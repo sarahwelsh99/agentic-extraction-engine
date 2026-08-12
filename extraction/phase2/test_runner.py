@@ -6,11 +6,14 @@ before deployment to Phase 4 production scale.
 Tests:
 1. Positive cases: Original sample data
 2. Negative cases: Edge cases, malformed data
-3. Schema compliance: Output structure matches target
+3. Schema compliance: Output structure matches mosaic schema
+
+Uses the same schema as mosaic-glean-extraction project.
 """
 import logging
 import json
 from typing import List, Dict, Any, Tuple
+import config
 
 logger = logging.getLogger(__name__)
 

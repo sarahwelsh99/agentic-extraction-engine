@@ -55,25 +55,63 @@ WRITE_BATCH_BYTES = int(os.getenv("WRITE_BATCH_BYTES", "10000000"))  # 10 MB
 # ===== Schema Configuration =====
 SCHEMA_VERSION = os.getenv("SCHEMA_VERSION", "1.0")
 SCHEMA_DIR = os.getenv("SCHEMA_DIR", "extraction/schemas")
+SCHEMA_FILE = os.getenv("SCHEMA_FILE", "extraction/schemas/mosaic_pii_schema.json")
 
-# Target fields for extraction (matches mosaic's PII schema)
+# Target fields for extraction - EXACT SAME SCHEMA as mosaic-glean-extraction
+# See: https://github.com/sarahwelsh99/mosaic-glean-extraction/blob/main/extraction/config.py
 SCHEMA_FIELDS = [
-    "PERSON_EMAIL",
-    "PERSON_PHONE",
-    "PERSON_NAME",
-    "PERSON_ADDRESS",
-    "PERSON_CITY",
-    "PERSON_STATE",
-    "PERSON_ZIP",
-    "PERSON_COUNTRY",
-    "PERSON_DATE_OF_BIRTH",
-    "PERSON_TAX_ID",
-    "PERSON_DRIVER_LICENSE",
-    "PERSON_PASSPORT",
+    "RECORD_TYPE", "JURISDICTION", "TELUS_BUSINESS",
+    "COMPANY_NAME", "DOCUMENT_CLASSIFICATION", "BOOL_PERSONAL_DATA", "PERSON_FULL_NAME",
+    "PERSON_FIRST_NAME", "PERSON_MIDDLE_NAME", "PERSON_LAST_NAME", "PERSON_SUFFIX",
+    "PERSON_ID_TYPE", "PERSON_ID", "PERSON_EMAIL", "PERSON_PHONE_NUM", "PHONE_ID",
+    "PERSON_DATE_OF_BIRTH", "PERSON_TAX_ID", "PERSON_ADDRESS_FULL", "PERSON_ADDRESS_STREET",
+    "PERSON_ADDRESS_LINE2", "PERSON_ADDRESS_CITY", "PERSON_ADDRESS_STATE", "PERSON_ADDRESS_ZIP",
+    "PERSON_ADDRESS_COUNTRY", "FULL_CC_NUM", "CC_CVV", "CC_EXPIRATION", "DRIVERS_LICENSE",
+    "PASSPORT", "MILITARY_ID", "GOVERNMENT_ID", "BANK_ACCT_NUM", "BANK_ROUTING_NUM",
+    "GEOLOCATION", "PATIENT_ID_TYPE", "PATIENT_ID", "IMEI_NUM", "IMSI_NUM", "E_SIM_SIM_EZ",
+    "BOOL_EMPLOYEE_COMPENSATION", "BOOL_BIOMETRIC_DATA", "BOOL_DIGITAL_SIGNATURE",
+    "BOOL_PERSONAL_CHARACTERISTICS", "BOOL_END_USER_CONTRACT", "BOOL_PATIENT_HISTORY",
     "PASSWORD_PIN",
     "JOB_TITLE",
     "OTHER_PII_TYPES",
 ]
+
+# Field-name aliases: LLM sometimes emits values under natural-language keys
+# (e.g. "SSN" instead of PERSON_TAX_ID). These are rerouted to canonical columns.
+# This prevents off-schema keys and improves dedup reliability.
+SCHEMA_ALIASES = {
+    "ssn": "PERSON_TAX_ID",
+    "social_security_number": "PERSON_TAX_ID",
+    "tin": "PERSON_TAX_ID",
+    "tax_id": "PERSON_TAX_ID",
+    "dob": "PERSON_DATE_OF_BIRTH",
+    "date_of_birth": "PERSON_DATE_OF_BIRTH",
+    "birth_date": "PERSON_DATE_OF_BIRTH",
+    "birthdate": "PERSON_DATE_OF_BIRTH",
+    "email": "PERSON_EMAIL",
+    "email_address": "PERSON_EMAIL",
+    "phone": "PERSON_PHONE_NUM",
+    "phone_number": "PERSON_PHONE_NUM",
+    "name": "PERSON_FULL_NAME",
+    "full_name": "PERSON_FULL_NAME",
+    "address": "PERSON_ADDRESS_FULL",
+    "address_full": "PERSON_ADDRESS_FULL",
+    "person_address_province": "PERSON_ADDRESS_STATE",
+    "province": "PERSON_ADDRESS_STATE",
+    "country": "PERSON_ADDRESS_COUNTRY",
+    "pin": "PASSWORD_PIN",
+    "password": "PASSWORD_PIN",
+    "passcode": "PASSWORD_PIN",
+    "temporary_passcode": "PASSWORD_PIN",
+    "token": "PASSWORD_PIN",
+    "security_code": "PASSWORD_PIN",
+    "rsa_pin": "PASSWORD_PIN",
+    "job_title": "JOB_TITLE",
+    "title": "JOB_TITLE",
+    "role": "JOB_TITLE",
+    "position": "JOB_TITLE",
+    "designation": "JOB_TITLE",
+}
 
 # ===== Logging & Debugging =====
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

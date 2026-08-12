@@ -22,12 +22,14 @@ logger = logging.getLogger(__name__)
 
 
 def generate_extractors(analysis: Dict[str, Any],
-                       schema_fields: list = config.SCHEMA_FIELDS) -> Dict[str, Any]:
+                       schema_fields: list = None) -> Dict[str, Any]:
     """Generate Python extraction code from pattern analysis.
+
+    Uses the exact schema from mosaic-glean-extraction project.
 
     Args:
         analysis: Output from Phase 1 analyzer
-        schema_fields: Target fields to extract
+        schema_fields: Target fields to extract (default: from config.SCHEMA_FIELDS)
 
     Returns:
         Generated extractor code and metadata
@@ -35,9 +37,12 @@ def generate_extractors(analysis: Dict[str, Any],
     if analysis.get("status") != "success":
         raise ValueError(f"Invalid analysis result: {analysis.get('status')}")
 
+    if schema_fields is None:
+        schema_fields = config.SCHEMA_FIELDS
+
     llm = get_llm_client()
 
-    # Build code generation prompt
+    # Build code generation prompt with full schema
     schema_str = json.dumps(schema_fields, indent=2)
     analysis_str = json.dumps(analysis.get("analysis", {}), indent=2)
 
