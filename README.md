@@ -54,7 +54,8 @@ The pipeline has four distinct phases:
 ### Setup
 
 1. **Prerequisites**
-   - vLLM running locally on `localhost:8000`
+   - 4 NVIDIA L4 GPUs (or equivalent)
+   - vLLM with tensor parallelism
    - BigQuery credentials (`GOOGLE_APPLICATION_CREDENTIALS`)
    - Python 3.9+
 
@@ -63,14 +64,23 @@ The pipeline has four distinct phases:
    pip install -r requirements.txt
    ```
 
-3. **Configure**
+3. **Start vLLM with tensor parallelism** (NEW!)
+   ```bash
+   chmod +x start_vllm.sh
+   ./start_vllm.sh
+   # Automatically enables --tensor-parallel-size 4 across all GPUs
+   # Displays GPU activation status
+   ```
+   See [GPU_SETUP.md](extraction/docs/GPU_SETUP.md) for detailed GPU configuration.
+
+4. **Configure pipeline**
    ```bash
    cp source.env.example source.env
    # Edit source.env with your project details
    source source.env
    ```
 
-4. **Initialize status table**
+5. **Initialize status table**
    ```bash
    python -c "from extraction import bigquery_service, config; \
              client = bigquery_service.get_bigquery_client(); \
@@ -206,6 +216,43 @@ Each phase produces:
 
 Check logs and GCS artifacts for detailed progress.
 
+## GPU & Tensor Parallelism
+
+### Verify All GPUs Are Working
+
+After starting vLLM with `./start_vllm.sh`, check:
+
+```bash
+# 1. vLLM startup log shows all GPUs active
+#    Look for: "✓ ACTIVE" for all 4 GPUs
+
+# 2. Real-time monitoring during pipeline
+python orchestrator.py --phase 1
+# Displays GPU status each minute:
+#   GPU 0: 45% util | Memory: 50% | Temp: 45°C | ✓ ACTIVE
+#   GPU 1: 42% util | Memory: 51% | Temp: 44°C | ✓ ACTIVE
+#   GPU 2: 44% util | Memory: 55% | Temp: 46°C | ✓ ACTIVE
+#   GPU 3: 41% util | Memory: 53% | Temp: 45°C | ✓ ACTIVE
+
+# 3. Manual verification
+watch -n 1 nvidia-smi
+# All 4 GPUs should show >0% GPU-Util and similar memory
+```
+
+See [GPU_SETUP.md](extraction/docs/GPU_SETUP.md) for:
+- Detailed tensor parallelism configuration
+- Troubleshooting unbalanced GPU utilization
+- Performance expectations with TP-4
+- Manual GPU monitoring scripts
+
+### Expected Performance
+
+With tensor parallelism across 4 L4 GPUs:
+- **Phase 1 (Code Gen)**: ~2-5 docs/sec
+- **Phase 3 (Quality)**: ~2-5 docs/sec
+- **Phase 4 (Execute)**: 100-1000+ docs/sec (CPU-only, no GPU)
+- **All 4 GPUs**: Active and balanced during Phases 1-3
+
 ## Troubleshooting
 
 ### vLLM not responding
@@ -213,6 +260,12 @@ Check logs and GCS artifacts for detailed progress.
 curl http://localhost:8000/v1/models
 # Should return list of available models
 ```
+
+### GPU utilization issues
+See [GPU_SETUP.md - Troubleshooting](extraction/docs/GPU_SETUP.md#troubleshooting) for:
+- Only 1 GPU active (enable tensor parallelism)
+- CUDA out of memory (lower memory utilization)
+- Imbalanced GPU usage (layer distribution issues)
 
 ### BigQuery authentication
 ```bash
