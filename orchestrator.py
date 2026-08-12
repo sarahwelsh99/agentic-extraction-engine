@@ -20,17 +20,21 @@ import os
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'extraction'))
 
 import config
+from gpu_monitor import create_monitor
 
 logging.basicConfig(
     level=getattr(logging, config.LOG_LEVEL),
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+gpu_monitor = create_monitor()
 
 
 def run_phase_1():
     """Phase 1: Pattern Analysis & Code Generation"""
     logger.info("=== PHASE 1: Pattern Analysis & Code Generation ===")
+    logger.info("Starting GPU monitoring...")
+    gpu_monitor.print_status()
 
     from phase1.analyzer import extract_samples_from_bigquery, analyze_samples
     from phase1.code_generator import generate_extractors, save_extractor
@@ -190,6 +194,15 @@ def main():
             return 1
 
     logger.info("Pipeline completed successfully")
+
+    # Print GPU monitoring summary
+    logger.info("\n=== GPU Utilization Summary ===")
+    gpu_monitor.print_status()
+    summary = gpu_monitor.get_summary()
+    if "error" not in summary:
+        logger.info(f"Average GPU Utilization: {summary['average_gpu_utilization_percent']:.1f}%")
+        logger.info(f"All GPUs active: {summary['percent_time_all_gpus_active']:.1f}% of time")
+
     return 0
 
 

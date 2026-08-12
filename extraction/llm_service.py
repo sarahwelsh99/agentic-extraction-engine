@@ -1,10 +1,14 @@
-"""LLM service for local vLLM inference.
+"""LLM service for local vLLM inference with tensor parallelism.
 
-Provides interface to local vLLM server for:
+Provides interface to local vLLM server (with tensor parallelism across GPUs) for:
 - Phase 1: Pattern analysis & code generation
 - Phase 3: Quality evaluation
 
 For Phase 4 execution, uses generated deterministic code (no LLM).
+
+The vLLM server should be started with:
+    ./start_vllm.sh
+This enables tensor parallelism across all available GPUs.
 """
 import logging
 import json
@@ -13,6 +17,9 @@ import requests
 import config
 
 logger = logging.getLogger(__name__)
+
+# Track tensor parallelism info
+_TP_INFO: Optional[Dict[str, Any]] = None
 
 
 class LocalLLMClient:
@@ -27,16 +34,41 @@ class LocalLLMClient:
         self.completions_url = f"{self.api_base}/v1/chat/completions"
 
     def is_healthy(self) -> bool:
-        """Check if vLLM server is responding."""
+        """Check if vLLM server is responding and get tensor parallelism info."""
         try:
             response = requests.get(
                 f"{self.api_base}/v1/models",
                 timeout=5
             )
-            return response.status_code == 200
+            if response.status_code == 200:
+                # Fetch server info to get tensor parallelism details
+                self._get_server_info()
+                return True
+            return False
         except Exception as e:
             logger.error(f"vLLM health check failed: {e}")
             return False
+
+    def _get_server_info(self) -> Dict[str, Any]:
+        """Get vLLM server info including tensor parallelism configuration."""
+        global _TP_INFO
+        try:
+            response = requests.get(
+                f"{self.api_base}/v1/models",
+                timeout=5
+            )
+            response.raise_for_status()
+            models = response.json()
+            if models.get('data'):
+                model_info = models['data'][0]
+                _TP_INFO = {
+                    "model": model_info.get('id'),
+                    "max_model_len": model_info.get('max_model_len'),
+                }
+            return _TP_INFO or {}
+        except Exception as e:
+            logger.warning(f"Could not fetch server info: {e}")
+            return {}
 
     def generate(self,
                  prompt: str,
