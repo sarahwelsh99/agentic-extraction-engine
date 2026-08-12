@@ -13,7 +13,7 @@ Uses the same schema as mosaic-glean-extraction project.
 import logging
 import json
 from typing import List, Dict, Any, Tuple
-import config
+from extraction.core import config
 
 logger = logging.getLogger(__name__)
 

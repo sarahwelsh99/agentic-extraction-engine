@@ -17,8 +17,8 @@ import logging
 from typing import List, Dict, Any, Optional
 import json
 import os
-from llm_service import get_llm_client
-import config
+from extraction.core.llm_service import get_llm_client
+from extraction.core import config
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +140,7 @@ def extract_samples_from_bigquery(limit: int = config.PHASE1_SAMPLES_PER_SOURCE)
     Returns:
         List of sample documents with title and body_text
     """
-    from bigquery_service import get_bigquery_client
+    from extraction.core.bigquery_service import get_bigquery_client
     from google.cloud import bigquery
 
     client = get_bigquery_client()

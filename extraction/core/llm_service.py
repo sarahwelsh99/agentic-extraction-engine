@@ -7,14 +7,14 @@ Provides interface to local vLLM server (with tensor parallelism across GPUs) fo
 For Phase 4 execution, uses generated deterministic code (no LLM).
 
 The vLLM server should be started with:
-    ./start_vllm.sh
+    ./scripts/start_vllm.sh
 This enables tensor parallelism across all available GPUs.
 """
 import logging
 import json
 from typing import Optional, Dict, Any
 import requests
-import config
+from . import config
 
 logger = logging.getLogger(__name__)
 

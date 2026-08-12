@@ -15,8 +15,8 @@ import json
 import hashlib
 from typing import Dict, Any, Optional
 from datetime import datetime, timezone
-from llm_service import get_llm_client
-import config
+from extraction.core.llm_service import get_llm_client
+from extraction.core import config
 
 logger = logging.getLogger(__name__)
 

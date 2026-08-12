@@ -16,11 +16,11 @@ import argparse
 import sys
 import os
 
-# Add extraction module to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'extraction'))
+# Add extraction module to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 
-import config
-from gpu_monitor import create_monitor
+from extraction.core import config
+from extraction.core.gpu_monitor import create_monitor
 
 logging.basicConfig(
     level=getattr(logging, config.LOG_LEVEL),

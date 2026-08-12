@@ -42,7 +42,7 @@ from typing import List, Optional
 
 from google.cloud import storage
 
-import config
+from . import config
 
 logger = logging.getLogger(__name__)
 

@@ -7,7 +7,7 @@ import logging
 from typing import Generator, List, Optional, Tuple
 from google.cloud import bigquery
 from google.api_core import exceptions as gexc
-import config
+from . import config
 
 logger = logging.getLogger(__name__)
 

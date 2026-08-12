@@ -32,7 +32,7 @@ import os
 from datetime import datetime, timezone
 from typing import Optional
 
-import config
+from . import config
 
 logger = logging.getLogger(__name__)
 

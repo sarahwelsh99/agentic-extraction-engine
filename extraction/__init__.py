@@ -1,8 +1,17 @@
 """Agentic extraction pipeline modules.
 
-Four phases:
-1. phase1: Pattern analysis & code generation
-2. phase2: Safety validation & testing
-3. phase3: Quality feedback loop
-4. phase4: Deterministic execution at scale
+Core infrastructure:
+- core: Shared services (config, BigQuery, vLLM, GPU monitoring, storage)
+
+Phases:
+- phase1: Pattern analysis & code generation (LLM-driven)
+- phase2: Safety validation & testing (deterministic)
+- phase3: Quality feedback loop (scaffolding)
+- phase4: Deterministic execution at scale (scaffolding)
+
+Schemas:
+- schemas: PII extraction schema definitions
+
+Tests:
+- tests: Test suite
 """

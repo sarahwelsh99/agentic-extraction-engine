@@ -42,7 +42,7 @@ import time
 from typing import Iterable, List, Optional, Tuple
 
 import bigquery_service
-import config
+from . import config
 
 logger = logging.getLogger(__name__)
 
