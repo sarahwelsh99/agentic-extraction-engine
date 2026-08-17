@@ -58,6 +58,11 @@ class GenerateParserScriptTool:
             # this attempt can avoid it.
             feedback = inputs.get("feedback")
             attempt = int(inputs.get("attempt", 1))
+            # Optional LLMSession spanning this document's whole retry loop
+            # (see run_pipeline.py). When given, a retry is a short follow-up
+            # turn against the code and failure already in the conversation
+            # rather than a prompt rebuilt from scratch each attempt.
+            session = inputs.get("session")
 
             if not report:
                 return json.dumps({
@@ -90,13 +95,11 @@ class GenerateParserScriptTool:
                 cache_hit = True
                 logger.info(f"Cache HIT for guid {guid}")
             else:
-                # Build prompt for vLLM
-                prompt = self._build_prompt(report, raw_sample, feedback)
-
-                # Call vLLM to generate code
+                # Call vLLM to generate code - statefully, if a session was given
                 start_time = time.time()
-                generated_code = self._call_vllm(
-                    prompt, max_tokens=self._output_budget(report)
+                generated_code = self._generate_code(
+                    report, raw_sample, feedback, session,
+                    max_tokens=self._output_budget(report),
                 )
                 generation_time = time.time() - start_time
 
@@ -186,6 +189,55 @@ class GenerateParserScriptTool:
             "has_header_row": report.get("header_source") == "row",
             "ragged": bool(report.get("ragged")),
         }
+
+    def _generate_code(self, report: Dict, sample: str, feedback: Optional[str],
+                        session, max_tokens: int) -> Optional[str]:
+        """Get code from the model, statefully when a session is given.
+
+        The first real generation in a session is the full document-structure
+        prompt (feedback folded in the same way the stateless path always has,
+        in case the session's first attempt was served from cache and never
+        actually generated anything). Once the session holds a turn this tool
+        itself generated, a retry is short: "fix this" against the code and
+        failure already in the conversation, not a rebuilt prompt re-deriving
+        the same structure from nothing.
+        """
+        if session is not None and session.messages:
+            prompt = (
+                "That attempt failed: "
+                f"{(feedback or 'unknown error')[: self.MAX_FEEDBACK_CHARS]}\n\n"
+                "Fix the DataExtractor class and return the complete corrected "
+                "code. Output ONLY executable Python code - no explanations, "
+                "no markdown fences."
+            )
+        else:
+            prompt = self._build_prompt(report, sample, feedback)
+
+        if session is not None:
+            return self._call_session(session, prompt, max_tokens)
+        return self._call_vllm(prompt, max_tokens=max_tokens)
+
+    def _call_session(self, session, prompt: str, max_tokens: int) -> Optional[str]:
+        """Send one turn through a stateful session.
+
+        Same retry-on-transient-error behaviour as the stateless completions
+        path (_call_vllm): a network hiccup gets a fresh attempt, a bad
+        generation gets re-asked in the same conversation rather than treated
+        as a network failure.
+        """
+        code = None
+        for attempt in range(self.max_retries):
+            try:
+                text = session.send(prompt, temperature=0.3, max_tokens=max_tokens)
+            except (TimeoutError, RuntimeError) as e:
+                logger.error(f"LLM session error (attempt {attempt+1}/{self.max_retries}): {e}")
+                if attempt >= self.max_retries - 1:
+                    raise
+                continue
+            code = self._extract_code(text)
+            if code:
+                return code
+        return code
 
     def _build_prompt(self, report: Dict, sample: str, feedback: str = None) -> str:
         """Prompt built from Tool 2's metadata report.

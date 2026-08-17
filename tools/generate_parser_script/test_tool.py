@@ -255,6 +255,100 @@ def test_prompt_is_bounded_by_the_header():
     print("✓ test_prompt_is_bounded_by_the_header PASSED")
 
 
+class FakeSession:
+    """Stands in for LLMSession: records prompts, replies are scripted."""
+
+    def __init__(self, replies, messages=None):
+        self.replies = list(replies)
+        self.messages = list(messages) if messages else []
+        self.sent = []
+
+    def send(self, prompt, temperature=0.0, max_tokens=2000):
+        self.sent.append(prompt)
+        reply = self.replies[len(self.sent) - 1]
+        self.messages.append({"role": "user", "content": prompt})
+        self.messages.append({"role": "assistant", "content": reply})
+        return reply
+
+
+def test_no_session_builds_the_full_document_prompt():
+    """Without a session, every attempt gets the same from-scratch prompt."""
+    tool = GenerateParserScriptTool()
+    seen = {}
+
+    def fake_call_vllm(prompt, max_tokens=2000):
+        seen["prompt"] = prompt
+        return "CODE"
+
+    tool._call_vllm = fake_call_vllm
+    code = tool._generate_code(REPORT, SAMPLE, None, session=None, max_tokens=2000)
+
+    assert code == "CODE"
+    assert seen["prompt"] == tool._build_prompt(REPORT, SAMPLE, None)
+
+    print("✓ test_no_session_builds_the_full_document_prompt PASSED")
+
+
+def test_empty_session_gets_the_full_document_prompt():
+    """A session's first real generation still needs the whole document.
+
+    Guards against the case where the session's first attempt was served
+    from cache and never actually generated anything: the next attempt must
+    not send a bare "fix this" with no code or document in view.
+    """
+    tool = GenerateParserScriptTool()
+    session = FakeSession(replies=["CODE"])
+
+    code = tool._generate_code(REPORT, SAMPLE, None, session=session, max_tokens=2000)
+
+    assert code == "CODE"
+    assert session.sent == [tool._build_prompt(REPORT, SAMPLE, None)]
+
+    print("✓ test_empty_session_gets_the_full_document_prompt PASSED")
+
+
+def test_session_with_history_gets_a_short_retry_prompt():
+    """Once the session holds this tool's own prior turn, a retry is 'fix this'.
+
+    The retry must reference the failure but must not rebuild the document
+    structure prompt: that context already lives in the conversation.
+    """
+    tool = GenerateParserScriptTool()
+    session = FakeSession(
+        replies=["CODE-v2"],
+        messages=[
+            {"role": "user", "content": "<earlier full prompt>"},
+            {"role": "assistant", "content": "CODE-v1"},
+        ],
+    )
+
+    code = tool._generate_code(
+        REPORT, SAMPLE, "parse_row raised IndexError", session=session, max_tokens=2000
+    )
+
+    assert code == "CODE-v2"
+    assert len(session.sent) == 1
+    retry_prompt = session.sent[0]
+    assert "IndexError" in retry_prompt, retry_prompt
+    assert REPORT["delimiter_name"] not in retry_prompt, "must not rebuild the document prompt"
+    assert "Fix the DataExtractor class" in retry_prompt
+
+    print("✓ test_session_with_history_gets_a_short_retry_prompt PASSED")
+
+
+def test_call_session_retries_on_empty_extraction():
+    """A reply with no extractable code is re-asked in the same conversation."""
+    tool = GenerateParserScriptTool()
+    session = FakeSession(replies=["not code at all", "CODE"])
+
+    code = tool._call_session(session, "generate code", max_tokens=2000)
+
+    assert code == "CODE"
+    assert len(session.sent) == 2, "a bad generation must trigger a retry"
+
+    print("✓ test_call_session_retries_on_empty_extraction PASSED")
+
+
 def run_all_tests():
     tests = [
         test_generates_a_working_parser,
@@ -267,6 +361,10 @@ def run_all_tests():
         test_hard_coded_width_is_rejected,
         test_stub_before_the_real_class_is_skipped,
         test_prompt_is_bounded_by_the_header,
+        test_no_session_builds_the_full_document_prompt,
+        test_empty_session_gets_the_full_document_prompt,
+        test_session_with_history_gets_a_short_retry_prompt,
+        test_call_session_retries_on_empty_extraction,
     ]
     passed = failed = 0
     for test in tests:
