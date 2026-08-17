@@ -34,8 +34,7 @@ For your Qwen3-Coder-30B model (~60GB):
 
 ```bash
 cd agentic-extraction-engine
-chmod +x start_vllm.sh
-./start_vllm.sh
+./scripts/start_vllm.sh
 ```
 
 This automatically:
@@ -62,7 +61,7 @@ python -m vllm.entrypoints.openai.api_server \
 
 ```bash
 # Only use GPUs 0,1,2 (skip GPU 3)
-CUDA_VISIBLE_DEVICES=0,1,2 ./start_vllm.sh
+CUDA_VISIBLE_DEVICES=0,1,2 ./scripts/start_vllm.sh
 
 # Only use GPU 0 (single GPU, for testing)
 CUDA_VISIBLE_DEVICES=0 python -m vllm.entrypoints.openai.api_server \
@@ -149,7 +148,7 @@ curl http://localhost:8000/v1/chat/completions \
 The orchestrator automatically monitors GPU utilization:
 
 ```bash
-python orchestrator.py --phase 1-2
+python run_pipeline.py <guid>
 ```
 
 Displays during execution:
@@ -182,7 +181,7 @@ Aggregate: 4/4 GPUs active | Avg Util: 47.9% | Total Memory: 49258 / 92136 MB
 pkill -f vllm
 
 # Start with explicit tensor parallelism
-./start_vllm.sh
+./scripts/start_vllm.sh
 ```
 
 ### Issue: vLLM crashes with CUDA errors
@@ -194,7 +193,7 @@ pkill -f vllm
 **Fix**:
 1. Lower `--gpu-memory-utilization` (default 0.9):
    ```bash
-   GPU_MEMORY_UTILIZATION=0.8 ./start_vllm.sh
+   GPU_MEMORY_UTILIZATION=0.8 ./scripts/start_vllm.sh
    ```
 
 2. Use smaller tensor parallelism (if not all GPUs needed):
@@ -218,7 +217,7 @@ pkill -f vllm
 
 2. Try with `--distributed-executor-backend ray`:
    ```bash
-   ./start_vllm.sh  # Already uses ray by default if available
+   ./scripts/start_vllm.sh  # Already uses ray by default if available
    ```
 
 ### Issue: "vLLM server failed to start"
@@ -235,7 +234,7 @@ pkill -f vllm
 
 2. Reduce model size or increase timeout:
    ```bash
-   MAX_MODEL_LEN=32768 ./start_vllm.sh
+   MAX_MODEL_LEN=32768 ./scripts/start_vllm.sh
    ```
 
 ## Performance Expectations
@@ -307,9 +306,9 @@ awk -F"," "{
 
 ## Next Steps
 
-1. ✅ Start vLLM with tensor parallelism: `./start_vllm.sh`
+1. ✅ Start vLLM with tensor parallelism: `./scripts/start_vllm.sh`
 2. ✅ Verify all 4 GPUs are active
-3. ✅ Run pipeline: `python orchestrator.py --phase 1-2`
+3. ✅ Run pipeline: `python run_pipeline.py <guid>`
 4. ✅ Monitor GPU utilization during execution
 5. ✅ Check summary at end of pipeline
 

@@ -6,7 +6,7 @@ This is a fast reference for enabling tensor parallelism across your 4 NVIDIA L4
 
 ```bash
 # 1. Start vLLM with tensor parallelism (from agentic-extraction-engine repo)
-./start_vllm.sh
+./scripts/start_vllm.sh
 
 # 2. In another terminal, verify all 4 GPUs are active
 nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total \
@@ -14,12 +14,12 @@ nvidia-smi --query-gpu=index,utilization.gpu,memory.used,memory.total \
     awk -F',' '{printf "GPU %s: %3d%% util | %6.0f / %6.0f MB\n", $1, $2, $3, $4}'
 
 # 3. Run the pipeline (automatically monitors GPUs)
-python orchestrator.py --phase 1-2
+python run_pipeline.py <guid>
 ```
 
 ## What It Does
 
-`./start_vllm.sh` automatically:
+`./scripts/start_vllm.sh` automatically:
 - ✅ Detects 4 GPUs
 - ✅ Enables `--tensor-parallel-size 4` (splits model across all 4 GPUs)
 - ✅ Sets GPU memory utilization to 90% (conservative)
@@ -42,7 +42,7 @@ All 4 should say `✓ ACTIVE`.
 
 ### During pipeline execution
 ```bash
-python orchestrator.py --phase 1
+python run_pipeline.py <guid>
 # Shows GPU status every minute:
 # ✓ All GPUs are active (tensor parallelism working)
 # Avg Util: 47.9% | Total Memory: 49258 / 92136 MB
@@ -71,12 +71,12 @@ All 4 GPUs should have:
 ### Only 1 GPU is active
 ```bash
 pkill -f vllm
-./start_vllm.sh  # Restart
+./scripts/start_vllm.sh  # Restart
 ```
 
 ### CUDA out of memory
 ```bash
-GPU_MEMORY_UTILIZATION=0.8 ./start_vllm.sh
+GPU_MEMORY_UTILIZATION=0.8 ./scripts/start_vllm.sh
 ```
 
 ### Imbalanced utilization (one GPU at 80%, others at 40%)
@@ -87,23 +87,23 @@ If it persists, see [GPU_SETUP.md](extraction/docs/GPU_SETUP.md#issue-imbalanced
 
 ```bash
 # Custom GPU utilization
-GPU_MEMORY_UTILIZATION=0.9 ./start_vllm.sh
+GPU_MEMORY_UTILIZATION=0.9 ./scripts/start_vllm.sh
 
 # Specific GPUs only (skip GPU 3)
-CUDA_VISIBLE_DEVICES=0,1,2 ./start_vllm.sh
+CUDA_VISIBLE_DEVICES=0,1,2 ./scripts/start_vllm.sh
 
 # Longer context length (more memory)
-MAX_MODEL_LEN=65536 ./start_vllm.sh
+MAX_MODEL_LEN=65536 ./scripts/start_vllm.sh
 
 # Lower context (lower memory, if needed)
-MAX_MODEL_LEN=32768 ./start_vllm.sh
+MAX_MODEL_LEN=32768 ./scripts/start_vllm.sh
 ```
 
 ## Next Steps
 
-1. Start vLLM: `./start_vllm.sh`
+1. Start vLLM: `./scripts/start_vllm.sh`
 2. Verify GPUs in another terminal: `nvidia-smi`
-3. Run pipeline: `python orchestrator.py --phase 1-2`
+3. Run pipeline: `python run_pipeline.py <guid>`
 4. Check GPU summary at end of output
 
 Full details: [GPU_SETUP.md](extraction/docs/GPU_SETUP.md)

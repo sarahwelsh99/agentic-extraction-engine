@@ -8,7 +8,7 @@ Writes extraction results as newline-delimited JSON (NDJSON) to Google Cloud Sto
 
 ## Why Write to GCS First (Not Direct BigQuery)?
 
-From mosaic's analysis (see GLEAN_EXTRACTION_OUTPUT_ANALYSIS.md):
+From mosaic's analysis of its own `output_store.py`:
 
 **Problems with direct BigQuery writes:**
 - ❌ Streaming inserts lock rows in buffer for 90 minutes
