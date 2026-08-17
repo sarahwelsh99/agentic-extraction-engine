@@ -31,6 +31,7 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 from tools import get_tool_by_name
 from extraction.metrics_recorder import record_pipeline_run
+from extraction.core.llm_service import get_llm_client, LLMSession
 
 # Attempts at generating a working script, including the first. Tool 5 decides
 # whether a failure is worth retrying; this bounds how often it can say yes.
@@ -312,6 +313,12 @@ def run_pipeline(guid: str, body_text: str = None, load: bool = True) -> dict:
     tool4 = _require_tool("sandbox_execute")
     tool5 = _require_tool("evaluate_extraction")
 
+    # One conversation for this document's whole generate-validate-retry loop:
+    # a retry is "fix this" against the code and failure Tool 3 already saw,
+    # not a rebuilt prompt re-deriving the same document structure. Scoped to
+    # this guid and dropped when the loop ends - never reused across documents.
+    llm_session = LLMSession(get_llm_client())
+
     feedback = None
     attempt = 0
     extracted_rows = []
@@ -332,6 +339,7 @@ def run_pipeline(guid: str, body_text: str = None, load: bool = True) -> dict:
                 "metadata_report": report,
                 "feedback": feedback,
                 "attempt": attempt,
+                "session": llm_session,
             }))
             tool3_end = time.time()
 
