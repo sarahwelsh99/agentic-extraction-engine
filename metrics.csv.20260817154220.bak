@@ -1,0 +1,4 @@
+ts,guid,source,batch_id,tool1_duration,tool1_elapsed,tool2_duration,tool2_elapsed,tool3_duration,tool3_elapsed,tool4_duration,tool4_elapsed,tool5_duration,tool5_elapsed,total_duration,total_rows_extracted,success
+2026-08-13T20:36:01.875052+00:00,test-fresh,agentic,1,0.0,0.0,0.001,0.001,13.393,13.395,0.66,14.055,0,0,14.055,0,false
+2026-08-13T20:37:22.622459+00:00,test-second-batch,agentic,1,0.0,0.0,0.001,0.002,17.964,17.966,0.687,18.654,0,0,18.653,0,false
+2026-08-13T21:11:21.125366+00:00,test-cache-batch-1,agentic,1,0.0,0.0,0.001,0.001,0.007,0.009,0.639,0.648,0,0,0.648,0,false

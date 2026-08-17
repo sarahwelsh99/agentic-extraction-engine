@@ -38,10 +38,11 @@ import heapq
 import logging
 import os
 import sqlite3
+import threading
 import time
 from typing import Iterable, List, Optional, Tuple
 
-import bigquery_service
+from . import bigquery_service
 from . import config
 
 logger = logging.getLogger(__name__)
@@ -60,7 +61,14 @@ class WorkQueue:
         # autocommit (isolation_level=None); each write below opens its own
         # explicit transaction, so a bin's completion commit is a deliberate,
         # single durability boundary rather than an implicit one.
-        self._conn = sqlite3.connect(path, isolation_level=None, timeout=30)
+        #
+        # check_same_thread=False because the prefetch thread reads bin
+        # membership while the main thread marks bins done. sqlite3 refuses
+        # cross-thread use of a connection by default, so the queue is serialized
+        # through _lock instead — two readers and one writer, all short.
+        self._conn = sqlite3.connect(
+            path, isolation_level=None, timeout=30, check_same_thread=False)
+        self._lock = threading.RLock()
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._init_schema()
 
@@ -87,31 +95,37 @@ class WorkQueue:
     # -- introspection --------------------------------------------------- #
 
     def is_built(self) -> bool:
-        return self._conn.execute("SELECT COUNT(*) FROM bins").fetchone()[0] > 0
+        with self._lock:
+            return self._conn.execute("SELECT COUNT(*) FROM bins").fetchone()[0] > 0
 
     def is_fully_done(self) -> bool:
-        remaining = self._conn.execute(
-            "SELECT COUNT(*) FROM bins WHERE status != 'done'").fetchone()[0]
-        return self.is_built() and remaining == 0
+        with self._lock:
+            remaining = self._conn.execute(
+                "SELECT COUNT(*) FROM bins WHERE status != 'done'").fetchone()[0]
+            return self.is_built() and remaining == 0
 
     def all_guids(self) -> List[str]:
-        return [r[0] for r in self._conn.execute("SELECT guid FROM items").fetchall()]
+        with self._lock:
+            return [r[0] for r in self._conn.execute("SELECT guid FROM items").fetchall()]
 
     def total_bins(self) -> int:
-        return self._conn.execute("SELECT COUNT(*) FROM bins").fetchone()[0]
+        with self._lock:
+            return self._conn.execute("SELECT COUNT(*) FROM bins").fetchone()[0]
 
     def bin_status(self, bin_id: int) -> Optional[str]:
-        row = self._conn.execute(
-            "SELECT status FROM bins WHERE bin_id = ?", (bin_id,)).fetchone()
-        return row[0] if row else None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT status FROM bins WHERE bin_id = ?", (bin_id,)).fetchone()
+            return row[0] if row else None
 
     def progress(self) -> dict:
-        total_bins, done_bins = self._conn.execute(
-            "SELECT COUNT(*), COALESCE(SUM(status = 'done'), 0) FROM bins").fetchone()
-        total_guids, done_guids = self._conn.execute(
-            "SELECT COALESCE(SUM(b.num_guids), 0), "
-            "COALESCE(SUM(CASE WHEN b.status = 'done' THEN b.num_guids ELSE 0 END), 0) "
-            "FROM bins b").fetchone()
+        with self._lock:
+            total_bins, done_bins = self._conn.execute(
+                "SELECT COUNT(*), COALESCE(SUM(status = 'done'), 0) FROM bins").fetchone()
+            total_guids, done_guids = self._conn.execute(
+                "SELECT COALESCE(SUM(b.num_guids), 0), "
+                "COALESCE(SUM(CASE WHEN b.status = 'done' THEN b.num_guids ELSE 0 END), 0) "
+                "FROM bins b").fetchone()
         return {"total_bins": total_bins, "done_bins": done_bins,
                 "total_guids": total_guids, "done_guids": done_guids}
 
@@ -173,23 +187,28 @@ class WorkQueue:
     # -- drain -------------------------------------------------------------- #
 
     def next_pending_bin(self) -> Optional[int]:
-        row = self._conn.execute(
-            "SELECT bin_id FROM bins WHERE status = 'pending' ORDER BY bin_id LIMIT 1"
-        ).fetchone()
-        return row[0] if row else None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT bin_id FROM bins WHERE status = 'pending' ORDER BY bin_id LIMIT 1"
+            ).fetchone()
+            return row[0] if row else None
 
     def bin_guids(self, bin_id: int) -> List[str]:
-        return [r[0] for r in self._conn.execute(
-            "SELECT guid FROM items WHERE bin_id = ?", (bin_id,)).fetchall()]
+        with self._lock:
+            return [r[0] for r in self._conn.execute(
+                "SELECT guid FROM items WHERE bin_id = ?", (bin_id,)).fetchall()]
 
     def mark_bin_done(self, bin_id: int) -> None:
-        """The crash-recovery checkpoint. Call only after this bin's rows and
-        ledger entries are durably written to GCS -- see pipeline.py's writer.
+        """The crash-recovery checkpoint. Call only after this bin's rows are
+        durably written -- run_corpus.py loads and marks status before this.
         """
-        self._conn.execute("UPDATE bins SET status = 'done' WHERE bin_id = ?", (bin_id,))
+        with self._lock:
+            self._conn.execute(
+                "UPDATE bins SET status = 'done' WHERE bin_id = ?", (bin_id,))
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
 
     def archive(self) -> str:
         """Renames this (fully-drained, reconciled) queue file aside so a

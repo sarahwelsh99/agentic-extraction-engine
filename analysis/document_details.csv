@@ -1,0 +1,51 @@
+GUID,Title,Doc Type,Body Length,Overall Status,Tool1 Status,Tool1 Issues,Tool2 Status,Tool2 Issues,Tool3 Status,Tool3 Issues,Tool4 Status,Tool4 Issues
+cd798399-8449-7324-9d3a-db16373ae0d3,SPOC Created Incidents Daily*_20250304_235759.344_EST.csv,Spreadsheet,869924,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+9dc1d2e8-7871-36c0-99c0-4cba2f77c8a1,SPOC Daily Incidents (Manual FCR Compute)*_20250225_042321.371_EST.csv,Spreadsheet,762592,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+c38a5377-c042-49fc-68c1-51c6c3fcfceb,SPOC Daily Incidents (Manual FCR Compute)*_20250309_032318.364_EST.csv,Spreadsheet,544950,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+138f0aba-e19b-5d91-fd7e-2281615b19cc,5199-TS.csv,Spreadsheet,348997,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+91402a87-d24e-9034-52f1-74de40b93224,Nesting Audits for EOD Reports,Spreadsheet,330577,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+afd64d43-7302-76f3-a533-902dc0d519df,QBR test,Spreadsheet,260071,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+04e5a058-793a-679b-0cf5-2b765c983b10,CE Care Calibration | Customer Aspiration QA form (Responses),Spreadsheet,253666,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+67bb0b9a-e254-4f07-8d21-40ed96cb079d,Copy of CE Care Calibration | Customer Aspiration QA form (Responses),Spreadsheet,253479,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+6151bcde-2090-b025-a4e4-0b6db04a961c,Copy of 2025 Amex Auditing form  (Responses),Spreadsheet,253036,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+a2c4df3b-97f9-578a-3dbb-969e81471897,Care Calibrations,Spreadsheet,252931,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+31482473-a6a6-b11e-759d-c3865b246cdb,Copy of 2025 Amex Auditing form  (Responses),Spreadsheet,251952,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+4f7f8391-7ade-4329-9d5e-8fd63cc29156,Copy of 2025 Amex Auditing form  (Responses),Spreadsheet,251922,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+a1a34c0a-584b-f1b0-24a9-600db2c55265,Copy of 2025 Amex Auditing form  (Responses),Spreadsheet,251920,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+eaab5bf5-a29e-bdbc-f766-220ab315d189,Copy of 2025 Amex Auditing form  (Responses),Spreadsheet,251920,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+ed7d6aa9-0534-fe99-79e2-3a8f256e917c,Copy of 2025 Amex Auditing form  (Responses),Spreadsheet,251879,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+287939ff-8fdf-c363-28f5-a22e10ff8f69,Copy of 2025 Amex Auditing form  (Responses),Spreadsheet,251817,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+eb3ae0be-1937-1811-2d9d-e1e921a6cdfd,Copy of 2025 Amex Auditing form  (Responses),Spreadsheet,251811,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+f384ccaa-1368-6ac1-10ce-8ae2b6525393,Copy of 2025 Amex Auditing form  (Responses),Spreadsheet,251811,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+6c23ead9-c945-6da9-5115-fdabe8407fdc,Import Audits,Spreadsheet,251776,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+01142eaf-6073-f610-0497-4d610eca78a2,ATA & Calibration Data,Spreadsheet,251764,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+46bff310-3843-cead-591a-12e34f65588d,2022 TIG Barclays CARE Form - 5 STAR Behavior  (Responses),Spreadsheet,251747,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+dc7b3cec-2c57-cb8c-b3f3-159d2cc2c2df,TELUS_Digital_South_Africa_-_Payroll_Report,Spreadsheet,251279,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+d9811db8-4976-1d29-76d3-df326a41bd72,Untitled spreadsheet,Spreadsheet,251125,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+ddffbdb6-5041-4d65-a744-5a0631a629aa,SA Report Payroll_June 2025,Spreadsheet,251117,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+7470884e-cb43-d973-8375-c9ae23539d52,ILO Calibration - Test,Spreadsheet,251112,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+8f769365-6db3-5eed-ca70-55004378ead3,AHT,Spreadsheet,251055,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+3f4c01c5-893d-472e-cf4a-5ae18017300c,Untitled spreadsheet,Spreadsheet,251006,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+38cfc46e-e3a3-ddf7-ed3f-78642348b51f,Copy of General Motors Activation - Make It Better (Responses),Spreadsheet,250921,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+8eef8744-4be6-b9e6-df7c-7bc233b4a6bf,AdsDomainQualityRatingProgramGerman(CH)-Applicationdatareport-2025-08-13T164417.8754250000,Spreadsheet,250817,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+9cd8f941-50c7-cfd3-7a57-d8306a6f9c81,AdsDomainQualityRatingProgramEstonian(EE)-Applicationdatareport-2025-06-22T170357.7510500000,Spreadsheet,250812,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+8f3788bc-e33f-63fc-1d1c-4541ec7c2638,sox 04.11.2025,Spreadsheet,250803,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+9c305fa2-cc29-8a49-9612-e781df4a8fd4,AdsDomainQualityRatingProgramDutch(BE)-Applicationdatareport-2025-08-04T164334.1030780000,Spreadsheet,250783,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+d75df130-f418-6eef-0129-8a464e01ff4e,Internet Domain Assessor - Dutch (BE),Spreadsheet,250782,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+6b2701f2-f18a-685f-cbc4-935d54874eab,TIP Barclays Internal Quality - Sep EOM.csv,Spreadsheet,250780,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+3aff74b7-1f1d-f5ae-e177-779175d64819,AdsDomainQualityRatingProgramGerman(CH)-Applicationdatareport-2025-07-31T164028.6361310000,Spreadsheet,250777,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+1a6265d4-1958-0a38-9948-dd639c334cc2,TIP Barclays Internal Quality - Aug EOM.csv,Spreadsheet,250773,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+05b3e0e6-065a-7e04-172b-ba20934295c6,AdsDomainQualityRatingProgramEnglish(IE)-Applicationdatareport-2025-06-19T170347.4395200000,Spreadsheet,250772,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+73b7b52b-c96e-9f3c-1e60-48cb7da06324,AdsDomainQualityRatingProgramEnglish(IE)-Applicationdatareport-2025-06-24T174022.6260810000,Spreadsheet,250769,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+60a41ea9-120a-e55c-eec7-14fb0b0cc90b,AHT Study v. QA Audit,Spreadsheet,250752,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+ffbfd4a5-9d60-fd21-bfa4-995ad23e5881,Internet Domain Assessor - Dutch (BE),Spreadsheet,250749,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+aaf19168-0aa1-c2b2-062c-b78277dcafa4,2020-04-01- Record Retention Schedule - Q2,Spreadsheet,250748,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+7e2c73ac-95e5-2aac-452d-f64adf5952f2,TIP Barclays Internal Quality - Jun EOM.csv,Spreadsheet,250746,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+39d8a726-c218-d74e-47b0-3519bd08226d,2020-02-10-Q1 -  Record Retention Results Capture,Spreadsheet,250744,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+7fb20645-ffaa-63bc-1b9e-fe90ba9c776b,AdsDomainQualityRatingProgramGerman(CH)-Applicationdatareport-2025-07-28T163937.0380530000,Spreadsheet,250744,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+1643fc1b-52b8-5327-fdb8-48de3f53092f,AdsDomainQualityRatingProgramEnglish(IE)-Applicationdatareport-2025-06-18T165411.3299170000,Spreadsheet,250742,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+27eab4ae-939b-0c85-3670-f7e96f5ed98c,PersonalizedInternetAssessor-English(US)-Applicationdatareport-2025-04-22T165714.2731410000 (2),Spreadsheet,250740,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+1a9185f9-e156-e2d8-c0d0-25a10e94938e,Internet Domain Assessor - Dutch (BE),Spreadsheet,250740,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+9fc4d8c7-a01b-8b5f-9e94-b28ab8877ad7,TIP Barclays Care | Care Customer Aspiration QA form (Responses) | YTD 2025,Spreadsheet,250736,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+a5e7432d-e67b-6f06-49ee-3c1f6b804a92,AdsDomainQualityRatingProgramGerman(CH)-Applicationdatareport-2025-08-12T164326.7837640000,Spreadsheet,250736,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None
+f652b673-ac4d-0066-ab95-76987d737e94,PersonalizedInternetAdsAssessor-German(DE)-Applicationdatareport-2025-02-02T161622.8312300000,Spreadsheet,250735,failed,,Tool 1 failed: None,,Tool 2 failed: None,,Tool 3 failed: None,,Tool 4 failed: None

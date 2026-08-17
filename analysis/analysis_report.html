@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Pipeline Analysis Report</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+        .header { background: #2c3e50; color: white; padding: 20px; border-radius: 5px; }
+        .summary { display: grid; grid-template-columns: repeat(4, 1fr); gap: 15px; margin: 20px 0; }
+        .stat-box { background: white; padding: 15px; border-radius: 5px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        .stat-number { font-size: 28px; font-weight: bold; color: #3498db; }
+        .stat-label { color: #7f8c8d; margin-top: 5px; }
+        table { width: 100%; border-collapse: collapse; background: white; margin: 20px 0; }
+        th { background: #34495e; color: white; padding: 10px; text-align: left; }
+        td { padding: 10px; border-bottom: 1px solid #ecf0f1; }
+        tr:hover { background: #f9f9f9; }
+        .status-success { color: #27ae60; font-weight: bold; }
+        .status-failed { color: #e74c3c; font-weight: bold; }
+        .issues-list { list-style: none; padding: 0; }
+        .issues-list li { padding: 5px 0; }
+        .issue-item { background: #fff3cd; padding: 8px; border-left: 3px solid #ffc107; margin: 5px 0; }
+        .tool-summary { margin: 20px 0; }
+        .tool-name { font-size: 16px; font-weight: bold; color: #2c3e50; margin-top: 15px; }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>Pipeline Analysis Report</h1>
+        <p>Generated: 2026-08-17 20:20:55</p>
+    </div>
+
+    <div class="summary">
+        <div class="stat-box">
+            <div class="stat-number">50</div>
+            <div class="stat-label">Total Documents</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-number" style="color: #27ae60;">0</div>
+            <div class="stat-label">Successful</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-number" style="color: #e74c3c;">50</div>
+            <div class="stat-label">Failed</div>
+        </div>
+        <div class="stat-box">
+            <div class="stat-number">0.0%</div>
+            <div class="stat-label">Success Rate</div>
+        </div>
+    </div>
+
+    <div class="tool-summary">
+        <h2>Tool Success Rates</h2>
+        <table>
+            <tr>
+                <th>Tool</th>
+                <th>Success Rate</th>
+                <th>Successful</th>
+                <th>Failed</th>
+                <th>Total Issues</th>
+            </tr>
+            <tr>
+                <td><strong>TOOL1</strong></td>
+                <td class="status-failed">0.0%</td>
+                <td>0</td>
+                <td>50</td>
+                <td>50</td>
+            </tr>
+            <tr>
+                <td><strong>TOOL2</strong></td>
+                <td class="status-failed">0.0%</td>
+                <td>0</td>
+                <td>50</td>
+                <td>50</td>
+            </tr>
+            <tr>
+                <td><strong>TOOL3</strong></td>
+                <td class="status-failed">0.0%</td>
+                <td>0</td>
+                <td>50</td>
+                <td>50</td>
+            </tr>
+            <tr>
+                <td><strong>TOOL4</strong></td>
+                <td class="status-failed">0.0%</td>
+                <td>0</td>
+                <td>50</td>
+                <td>50</td>
+            </tr>
+        </table>
+    </div>
+
+    <div class="tool-summary">
+        <h2>Failed Documents (50 total)</h2>
+        <table>
+            <tr>
+                <th>GUID</th>
+                <th>Title</th>
+                <th>Issues</th>
+            </tr>
+            <tr>
+                <td><code>cd798399...</code></td>
+                <td>SPOC Created Incidents Daily*_20250304_235759.344_EST.csv</td>
+                <td><div class="issue-item">Tool 1 failed: None</div><div class="issue-item">Tool 2 failed: None</div><div class="issue-item">Tool 3 failed: None</div></td>
+            </tr>
+            <tr>
+                <td><code>9dc1d2e8...</code></td>
+                <td>SPOC Daily Incidents (Manual FCR Compute)*_20250225_042321.371_EST.csv</td>
+                <td><div class="issue-item">Tool 1 failed: None</div><div class="issue-item">Tool 2 failed: None</div><div class="issue-item">Tool 3 failed: None</div></td>
+            </tr>
+            <tr>
+                <td><code>c38a5377...</code></td>
+                <td>SPOC Daily Incidents (Manual FCR Compute)*_20250309_032318.364_EST.csv</td>
+                <td><div class="issue-item">Tool 1 failed: None</div><div class="issue-item">Tool 2 failed: None</div><div class="issue-item">Tool 3 failed: None</div></td>
+            </tr>
+            <tr>
+                <td><code>138f0aba...</code></td>
+                <td>5199-TS.csv</td>
+                <td><div class="issue-item">Tool 1 failed: None</div><div class="issue-item">Tool 2 failed: None</div><div class="issue-item">Tool 3 failed: None</div></td>
+            </tr>
+            <tr>
+                <td><code>91402a87...</code></td>
+                <td>Nesting Audits for EOD Reports</td>
+                <td><div class="issue-item">Tool 1 failed: None</div><div class="issue-item">Tool 2 failed: None</div><div class="issue-item">Tool 3 failed: None</div></td>
+            </tr>
+            <tr>
+                <td><code>afd64d43...</code></td>
+                <td>QBR test</td>
+                <td><div class="issue-item">Tool 1 failed: None</div><div class="issue-item">Tool 2 failed: None</div><div class="issue-item">Tool 3 failed: None</div></td>
+            </tr>
+            <tr>
+                <td><code>04e5a058...</code></td>
+                <td>CE Care Calibration | Customer Aspiration QA form (Responses)</td>
+                <td><div class="issue-item">Tool 1 failed: None</div><div class="issue-item">Tool 2 failed: None</div><div class="issue-item">Tool 3 failed: None</div></td>
+            </tr>
+            <tr>
+                <td><code>67bb0b9a...</code></td>
+                <td>Copy of CE Care Calibration | Customer Aspiration QA form (Responses)</td>
+                <td><div class="issue-item">Tool 1 failed: None</div><div class="issue-item">Tool 2 failed: None</div><div class="issue-item">Tool 3 failed: None</div></td>
+            </tr>
+            <tr>
+                <td><code>6151bcde...</code></td>
+                <td>Copy of 2025 Amex Auditing form  (Responses)</td>
+                <td><div class="issue-item">Tool 1 failed: None</div><div class="issue-item">Tool 2 failed: None</div><div class="issue-item">Tool 3 failed: None</div></td>
+            </tr>
+            <tr>
+                <td><code>a2c4df3b...</code></td>
+                <td>Care Calibrations</td>
+                <td><div class="issue-item">Tool 1 failed: None</div><div class="issue-item">Tool 2 failed: None</div><div class="issue-item">Tool 3 failed: None</div></td>
+            </tr>
+            <tr>
+                <td><code>31482473...</code></td>
+                <td>Copy of 2025 Amex Auditing form  (Responses)</td>
+                <td><div class="issue-item">Tool 1 failed: None</div><div class="issue-item">Tool 2 failed: None</div><div class="issue-item">Tool 3 failed: None</div></td>
+            </tr>
+            <tr>
+                <td><code>4f7f8391...</code></td>
+                <td>Copy of 2025 Amex Auditing form  (Responses)</td>
+                <td><div class="issue-item">Tool 1 failed: None</div><div class="issue-item">Tool 2 failed: None</div><div class="issue-item">Tool 3 failed: None</div></td>
+            </tr>
+            <tr>
+                <td><code>a1a34c0a...</code></td>
+                <td>Copy of 2025 Amex Auditing form  (Responses)</td>
+                <td><div class="issue-item">Tool 1 failed: None</div><div class="issue-item">Tool 2 failed: None</div><div class="issue-item">Tool 3 failed: None</div></td>
+            </tr>
+            <tr>
+                <td><code>eaab5bf5...</code></td>
+                <td>Copy of 2025 Amex Auditing form  (Responses)</td>
+                <td><div class="issue-item">Tool 1 failed: None</div><div class="issue-item">Tool 2 failed: None</div><div class="issue-item">Tool 3 failed: None</div></td>
+            </tr>
+            <tr>
+                <td><code>ed7d6aa9...</code></td>
+                <td>Copy of 2025 Amex Auditing form  (Responses)</td>
+                <td><div class="issue-item">Tool 1 failed: None</div><div class="issue-item">Tool 2 failed: None</div><div class="issue-item">Tool 3 failed: None</div></td>
+            </tr>
+            <tr>
+                <td><code>287939ff...</code></td>
+                <td>Copy of 2025 Amex Auditing form  (Responses)</td>
+                <td><div class="issue-item">Tool 1 failed: None</div><div class="issue-item">Tool 2 failed: None</div><div class="issue-item">Tool 3 failed: None</div></td>
+            </tr>
+            <tr>
+                <td><code>eb3ae0be...</code></td>
+                <td>Copy of 2025 Amex Auditing form  (Responses)</td>
+                <td><div class="issue-item">Tool 1 failed: None</div><div class="issue-item">Tool 2 failed: None</div><div class="issue-item">Tool 3 failed: None</div></td>
+            </tr>
+            <tr>
+                <td><code>f384ccaa...</code></td>
+                <td>Copy of 2025 Amex Auditing form  (Responses)</td>
+                <td><div class="issue-item">Tool 1 failed: None</div><div class="issue-item">Tool 2 failed: None</div><div class="issue-item">Tool 3 failed: None</div></td>
+            </tr>
+            <tr>
+                <td><code>6c23ead9...</code></td>
+                <td>Import Audits</td>
+                <td><div class="issue-item">Tool 1 failed: None</div><div class="issue-item">Tool 2 failed: None</div><div class="issue-item">Tool 3 failed: None</div></td>
+            </tr>
+            <tr>
+                <td><code>01142eaf...</code></td>
+                <td>ATA & Calibration Data</td>
+                <td><div class="issue-item">Tool 1 failed: None</div><div class="issue-item">Tool 2 failed: None</div><div class="issue-item">Tool 3 failed: None</div></td>
+            </tr>
+        </table>
+    </div>
+
+</body>
+</html>

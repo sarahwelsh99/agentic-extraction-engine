@@ -64,23 +64,66 @@ Once Phase 2 passes, code is locked and signed (checksum recorded).
 
 Never call Phase 4 manually while other phases are running.
 
+## Population Selection (Runs Before Phase 1)
+
+`population_selection/` is a standalone module — it doesn't import
+orchestrator.py, run_pipeline.py, phase1-4, or tools/ — that decides which
+`glean.drive_files` rows (`triage_category = 'INCL_STRUCTURED_RECORD'`)
+actually contain PII and should be extracted. One-time, but safe to rerun.
+
+```bash
+python -m population_selection                            # dry run: report counts
+python -m population_selection --execute                   # run the regex pass
+python -m population_selection --execute --source-limit 500  # smoke test on a slice
+```
+
+One set-based MERGE, no per-row BigQuery round trips and **no LLM calls at
+all**: scores each document's `body_text` against 9 PII categories (DOB,
+government ID, address, financial account, health/biometric, credential,
+device ID, person ID, personal email) and flags it `pending` the moment
+**any single category** matches, `excluded_no_pii` when none do. A bare
+person name, or a name plus only contact info (email/phone), is deliberately
+NOT enough on its own — see `population_selection/selector.py`'s module
+docstring for the full reasoning.
+
+The category patterns and this any-match rule aren't invented here — they're
+ported directly from `mosaic-glean-extraction`'s `extraction/prefilter.py`
+(Shubhankar Dash), the production-validated version of this exact decision.
+Re-running that repo's own backtest methodology against 20,000 real
+`glean.drive_files` guids with real extraction ground truth (from
+`glean_extract.pii_extraction`) measured a 77.7% skip rate at a 1.85%
+false-negative rate among skipped docs — most of them `PERSON_DATE_OF_BIRTH`-
+only hits, which are a documented, known case of the extraction LLM
+hallucinating ordinary business dates as DOB on drive documents (noise in
+the ground truth, not real misses).
+
+Rerunning only touches rows still in `pending` / `excluded_no_pii` (plus the
+now-retired `needs_llm_review`, kept in the MATCHED guard purely to sweep up
+any row an earlier version of this module left there) — anything Phase 4 has
+already completed or errored on is left untouched, so tuning the regex
+patterns or re-running after new source rows land is always safe.
+
 ## Status Table Schema
 
-The `pii_extraction_status` table tracks progress:
+The `pii_extraction_status` table tracks population selection and extraction progress:
 
 | Column | Type | Meaning |
 |---|---|---|
 | `guid` | STRING | Document ID |
-| `status` | STRING | `pending` \| `complete` \| `error_*` \| `dense` \| `oversized` |
+| `status` | STRING | `excluded_no_pii` \| `pending` \| `complete` \| `error_*` \| `dense` \| `oversized` |
 | `extraction_version` | STRING | Version of code that processed this (e.g., `v1.0`) |
 | `extracted_at` | TIMESTAMP | When extraction completed |
 | `error_message` | STRING | Error details if status is `error_*` |
 | `body_length` | INTEGER | Size of input document |
 | `body_text` | STRING | The actual document text |
+| `pii_score` | INTEGER | Count of PII categories matched (population selection) |
+| `pii_signals` | STRING | Comma-joined category names matched, e.g. `DOB,ADDRESS` |
+| `pii_detection_method` | STRING | `regex` (population selection's only detection method) |
 
 ### Status Values
 
-- `pending` — not yet processed
+- `excluded_no_pii` — population selection's regex pass found no PII category signal; will not be extracted
+- `pending` — flagged as containing PII, not yet processed by extraction
 - `complete` — successfully extracted
 - `error_llm` — vLLM call failed
 - `error_truncated` — output was cut off at token cap
@@ -270,6 +313,7 @@ Before running Phase 4:
 - [ ] BigQuery metadata read passes (query drive_files works)
 - [ ] GCS bucket has write permissions
 - [ ] Enough local disk for work queue SQLite (typically <100 MB)
+- [ ] `python -m population_selection` has run (Phase 4 should only see rows population selection flagged `pending`)
 
 ## Questions?
 

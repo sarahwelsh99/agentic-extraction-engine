@@ -68,8 +68,10 @@ def test_tool_metadata():
     assert tool.name == "fetch_and_sample"
     assert "sample" in tool.description.lower()
     assert "source_path" in tool.input_schema["properties"]
+    assert "body_text" in tool.input_schema["properties"]
     assert "status" in tool.output_schema["properties"]
-    assert "source_path" in tool.input_schema["required"]
+    # Either source_path or body_text is required (via anyOf constraint)
+    assert "anyOf" in tool.input_schema or len(tool.input_schema["required"]) == 0
 
     print("✓ test_tool_metadata PASSED")
 

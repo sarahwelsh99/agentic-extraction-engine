@@ -1,0 +1,17 @@
+ts,guid,source,batch_id,tool,duration_sec,rows_extracted,success
+2026-08-13T19:48:17.585772+00:00,test-full-pipeline,agentic,1,Tool 1: fetch_and_sample,0.0,0,true
+2026-08-13T19:48:17.585772+00:00,test-full-pipeline,agentic,1,Tool 2: infer_schema_and_profile,0.001,0,true
+2026-08-13T19:48:17.585772+00:00,test-full-pipeline,agentic,1,pipeline_total,0.001,0,false
+2026-08-13T20:12:10.359347+00:00,test-debug-001,agentic,1,Tool 1: fetch_and_sample,0.0,0,true
+2026-08-13T20:12:10.359347+00:00,test-debug-001,agentic,1,Tool 2: infer_schema_and_profile,0.001,0,true
+2026-08-13T20:12:10.359347+00:00,test-debug-001,agentic,1,Tool 3: generate_parser_script,9.651,0,true
+2026-08-13T20:12:10.359347+00:00,test-debug-001,agentic,1,pipeline_total,9.652,0,false
+2026-08-13T20:14:10.418204+00:00,test-e2e-001,agentic,1,Tool 1: fetch_and_sample,0.0,0,true
+2026-08-13T20:14:10.418204+00:00,test-e2e-001,agentic,1,Tool 2: infer_schema_and_profile,0.001,0,true
+2026-08-13T20:14:10.418204+00:00,test-e2e-001,agentic,1,Tool 3: generate_parser_script,12.547,0,true
+2026-08-13T20:14:10.418204+00:00,test-e2e-001,agentic,1,pipeline_total,12.548,0,false
+2026-08-13T20:17:12.561679+00:00,test-e2e-002,agentic,1,Tool 1: fetch_and_sample,0.0,0,true
+2026-08-13T20:17:12.561679+00:00,test-e2e-002,agentic,1,Tool 2: infer_schema_and_profile,0.001,0,true
+2026-08-13T20:17:12.561679+00:00,test-e2e-002,agentic,1,Tool 3: generate_parser_script,18.052,0,true
+2026-08-13T20:17:12.561679+00:00,test-e2e-002,agentic,1,Tool 4: sandbox_run_and_evaluate,2.061,0,true
+2026-08-13T20:17:12.561679+00:00,test-e2e-002,agentic,1,pipeline_total,20.114,0,false
