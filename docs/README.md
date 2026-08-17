@@ -1,62 +1,64 @@
 # Agentic Extraction Engine
 
-High-throughput, self-correcting data extraction pipeline using LLMs as logic generators and quality judges.
+Self-correcting data extraction pipeline: an LLM writes a parser for each
+document's own structure, a sandbox runs it, a second pass judges whether it
+worked, and a retry gets the failure fed back to the model rather than a
+fresh attempt from nothing.
 
-## Architecture Overview
+## Architecture overview
 
-The pipeline has four distinct phases:
+Six tools, chained per document by `run_pipeline.py`:
 
-### Phase 1: Pattern Analysis & Code Generation
-- Analyzes sample payloads (5-20 documents)
-- Uses local vLLM to identify structural patterns
-- Generates deterministic Python extraction code
-- Output: `extractors_v<N>.py` with standard interface
+```
+1  fetch_and_sample        fetch the source and take a representative sample
+2  delimiter_detector      report how the document is laid out
+3  generate_parser_script  write a deterministic parser from that report
+4  sandbox_execute         run the parser over the whole document
+5  evaluate_extraction     decide whether the extraction worked
+6  load_to_bigquery        load a passing extraction, one table per guid
+```
 
-### Phase 2: Safety Validation & Testing
-- AST-based safety inspection (no dangerous imports/calls)
-- Deterministic test execution on sample data
-- Schema compliance validation
-- Output: Approved, signed extractors
+A failure at step 5 retries from step 3 (bounded by
+`MAX_EXTRACTION_ATTEMPTS`), passing the failure back to the model instead of
+re-deriving the document's structure from scratch each time.
 
-### Phase 3: Quality Feedback Loop
-- Sample execution on 10K payloads
-- LLM-driven quality evaluation
-- Identifies failure patterns
-- Triggers re-analysis if quality is below threshold
+`population_selection/` runs independently, before any of the above: a
+regex pass over `glean.drive_files` that decides which documents contain PII
+and are worth extracting at all.
 
-### Phase 4: Deterministic Execution at Scale
-- Executes validated extractors on millions of payloads
-- Local SQLite work queue (crash-safe, resumable)
-- Background prefetcher for async BigQuery reads
-- Async writer to GCS (zero BigQuery writes during execution)
-- Uses status ledger pattern (separate cron for BQ reconciliation)
+See **[ARCHITECTURE.md](ARCHITECTURE.md)** for the full module layout,
+**[TOOLS.md](TOOLS.md)** for what each tool takes and returns, and
+**[PIPELINE_OPERATIONS.md](PIPELINE_OPERATIONS.md)** for running it,
+metrics, and caching. **[CLAUDE.md](CLAUDE.md)** has the operating notes and
+terminology.
 
-## Key Design Decisions
+## Key design decisions
 
-### Local LLM First
-- Uses local vLLM server (OpenAI-compatible API)
-- No external API calls or rate limits
-- Full privacy for extraction patterns
+### Local LLM first
+- Uses a local vLLM server (OpenAI-compatible API) — no external API calls,
+  no rate limits, no extraction content leaving the environment.
 
-### LLM for Code Generation, Not Direct Inference
-- **Expensive (Phases 1-3)**: LLM analysis, code generation, quality evaluation
-- **Cheap (Phase 4)**: Deterministic code execution at CPU/database speed
-- **Cost model**: ~$2-5 LLM cost for 1M payloads (front-loaded), then $0 per payload
+### Cache generated code, don't regenerate it
+- Tool 3's output is cached by a hash of the document's *structure*
+  (delimiter, header shape, field count — not row counts or column names),
+  so every document sharing a shape reuses one generated parser.
 
-### Reuses Mosaic's Battle-Tested Patterns
-- Work queue (SQLite bins, LPT packing, crash recovery)
-- Status ledger (GCS NDJSON, deferred BigQuery reconciliation)
-- Async writer and prefetcher threads
-- Retry/backoff for transient failures
+### Reuses mosaic's battle-tested patterns
+- Work queue (`extraction/core/workqueue.py`): SQLite bins, LPT packing,
+  crash recovery, reused for `run_corpus.py`'s backlog drain.
+- BigQuery service layer, retry/backoff for transient failures
+  (`extraction/core/bigquery_service.py`).
+- Population selection's PII patterns are ported directly from
+  `mosaic-glean-extraction`'s production-validated prefilter — see
+  [CLAUDE.md](CLAUDE.md).
 
 ## Quick Start
 
 ### Setup
 
 1. **Prerequisites**
-   - 4 NVIDIA L4 GPUs (or equivalent)
-   - vLLM with tensor parallelism
-   - BigQuery credentials (`GOOGLE_APPLICATION_CREDENTIALS`)
+   - 4 NVIDIA L4 GPUs (or equivalent) for the local vLLM server
+   - BigQuery credentials (`GOOGLE_APPLICATION_CREDENTIALS` or `gcloud auth`)
    - Python 3.9+
 
 2. **Install dependencies**
@@ -64,219 +66,94 @@ The pipeline has four distinct phases:
    pip install -r requirements.txt
    ```
 
-3. **Start vLLM with tensor parallelism** (NEW!)
+3. **Start vLLM with tensor parallelism**
    ```bash
-   chmod +x start_vllm.sh
-   ./start_vllm.sh
-   # Automatically enables --tensor-parallel-size 4 across all GPUs
-   # Displays GPU activation status
+   ./scripts/start_vllm.sh
    ```
-   See [GPU_SETUP.md](extraction/docs/GPU_SETUP.md) for detailed GPU configuration.
+   See [GPU_SETUP.md](GPU_SETUP.md) for detailed GPU configuration.
 
-4. **Configure pipeline**
+4. **Configure**
    ```bash
    cp source.env.example source.env
    # Edit source.env with your project details
    source source.env
    ```
 
-5. **Initialize status table**
+5. **Provision the output table** (once)
    ```bash
-   python -c "from extraction import bigquery_service, config; \
-             client = bigquery_service.get_bigquery_client(); \
-             bigquery_service.initialize_status_table(client, \
-               bigquery_service.get_status_table_id(client))"
+   python scripts/provision_extraction_table.py --create
    ```
 
-### Run Pipeline
+### Run
 
 ```bash
-# Run all phases (1-4)
-python orchestrator.py
+# One document
+python run_pipeline.py <guid>
 
-# Run specific phases
-python orchestrator.py --phase 1      # Pattern analysis only
-python orchestrator.py --phase 1-2    # Through safety validation
-python orchestrator.py --phase 4      # Scale execution (requires Phase 1-3 complete)
-
-# Dry-run (validate config without executing)
-python orchestrator.py --dry-run
-
-# Resume Phase 4 from checkpoint
-python orchestrator.py --phase 4 --resume
+# The whole backlog
+python -m population_selection --execute
+python run_corpus.py
 ```
+
+See [PIPELINE_OPERATIONS.md](PIPELINE_OPERATIONS.md) for the full set of
+flags, metrics, and caching.
 
 ## Configuration
 
-See `extraction/config.py` for all configuration options. Key env variables:
+See `extraction/core/config.py` for every option. The ones you're most
+likely to touch:
 
 ```bash
-# Project & Infrastructure
 PROJECT_ID=your-gcp-project
-GCS_OUTPUT_BUCKET=your-bucket
 DATASET_ID=glean_extract
+GCS_OUTPUT_BUCKET=your-bucket
 
-# Data Source
 SOURCE_PROJECT=glean
 SOURCE_TABLE=drive_files
 SOURCE_TRIAGE_CATEGORY=INCL_STRUCTURED_RECORD
 
-# Local vLLM
 VLLM_API_BASE=http://localhost:8000
 VLLM_MODEL=QuantTrio/Qwen3-Coder-30B-A3B-Instruct-GPTQ-Int8
-
-# Phase Configuration
-PHASE1_SAMPLES_PER_SOURCE=20
-PHASE2_SAFETY_CHECK_ENABLED=true
-PHASE3_QUALITY_SAMPLE_SIZE=10000
-PHASE4_MAX_WORKERS=96
 ```
 
-## Data Flow
+`config.py` also still defines `PHASE1_*`/`PHASE2_*`/`PHASE3_*`/`PHASE4_*`
+and `QUEUE_*` variables. The `QUEUE_*` ones are live (used by
+`extraction/core/workqueue.py` via `run_corpus.py`); the `PHASE*` ones belong
+to the legacy `orchestrator.py` path described in
+[ARCHITECTURE.md](ARCHITECTURE.md) and aren't read by anything in the tools
+pipeline.
 
-```
-glean.drive_files (INCL_STRUCTURED_RECORD)
-        ↓
-  [Phase 1: Code Gen]
-        ↓
-  [Phase 2: Safety]
-        ↓
-  [Phase 3: Quality Loop]
-        ↓
-  [Phase 4: Execute]
-        ↓
-  GCS Output
-        ↓
-  load_extracted_to_bq.py (cron, 4h)
-        ↓
-  BigQuery pii_extraction table
-```
-
-## File Structure
-
-```
-extraction/
-  phase1/
-    analyzer.py          # Pattern analysis
-    code_generator.py    # Code synthesis
-  phase2/
-    code_validator.py    # AST safety checks
-    test_runner.py       # Test execution
-  phase3/               # Quality loop (scaffolding)
-  phase4/               # Scale execution (scaffolding)
-  
-  # Core Infrastructure (from mosaic)
-  config.py             # Configuration
-  bigquery_service.py   # BQ operations
-  llm_service.py        # Local vLLM client
-  workqueue.py          # SQLite work queue
-  status_ledger.py      # GCS status ledger
-  output_store.py       # GCS output writer
-  throughput.py         # Metrics
-
-orchestrator.py         # Main entry point
-```
-
-## Development
-
-### Adding New Phases
-1. Create `extraction/phase<N>/` directory
-2. Implement phase logic
-3. Add entry point in `orchestrator.py`
-
-### Testing
-```bash
-python -m pytest extraction/tests/
-```
-
-### Local Development
-```bash
-# Install dev dependencies
-pip install -r requirements-dev.txt
-
-# Run with debug logging
-DEBUG=true LOG_LEVEL=DEBUG python orchestrator.py --phase 1-2
-```
-
-## Performance
-
-Expected throughput (Phase 4):
-- GPU vLLM: ~5-10 docs/sec (concurrent LLM inference)
-- CPU extraction: ~100-1000 docs/sec (deterministic code)
-- BigQuery: Prefetcher hides latency (async background fetches)
-- GCS writes: 1000+ docs/sec (batched, async)
-
-## Monitoring
-
-Each phase produces:
-- **Phase 1**: Pattern analysis JSON, generated code, code hash
-- **Phase 2**: Safety report, test results, schema validation
-- **Phase 3**: Quality metrics, failure patterns, iteration count
-- **Phase 4**: Extraction rate, error distribution, throughput metrics
-
-Check logs and GCS artifacts for detailed progress.
-
-## GPU & Tensor Parallelism
-
-### Verify All GPUs Are Working
-
-After starting vLLM with `./start_vllm.sh`, check:
+## Testing
 
 ```bash
-# 1. vLLM startup log shows all GPUs active
-#    Look for: "✓ ACTIVE" for all 4 GPUs
-
-# 2. Real-time monitoring during pipeline
-python orchestrator.py --phase 1
-# Displays GPU status each minute:
-#   GPU 0: 45% util | Memory: 50% | Temp: 45°C | ✓ ACTIVE
-#   GPU 1: 42% util | Memory: 51% | Temp: 44°C | ✓ ACTIVE
-#   GPU 2: 44% util | Memory: 55% | Temp: 46°C | ✓ ACTIVE
-#   GPU 3: 41% util | Memory: 53% | Temp: 45°C | ✓ ACTIVE
-
-# 3. Manual verification
-watch -n 1 nvidia-smi
-# All 4 GPUs should show >0% GPU-Util and similar memory
+python -m pytest tools/ extraction/ population_selection/
 ```
 
-See [GPU_SETUP.md](extraction/docs/GPU_SETUP.md) for:
-- Detailed tensor parallelism configuration
-- Troubleshooting unbalanced GPU utilization
-- Performance expectations with TP-4
-- Manual GPU monitoring scripts
-
-### Expected Performance
-
-With tensor parallelism across 4 L4 GPUs:
-- **Phase 1 (Code Gen)**: ~2-5 docs/sec
-- **Phase 3 (Quality)**: ~2-5 docs/sec
-- **Phase 4 (Execute)**: 100-1000+ docs/sec (CPU-only, no GPU)
-- **All 4 GPUs**: Active and balanced during Phases 1-3
+Each tool's unit tests live at `tools/<name>/test_tool.py` and run against
+the real local vLLM server where a tool calls it — no mocking. Slower,
+network-dependent integration checks are separate: `test_tools_1_to_4.py`
+(see [PIPELINE_OPERATIONS.md](PIPELINE_OPERATIONS.md)).
 
 ## Troubleshooting
 
 ### vLLM not responding
 ```bash
 curl http://localhost:8000/v1/models
-# Should return list of available models
 ```
 
 ### GPU utilization issues
-See [GPU_SETUP.md - Troubleshooting](extraction/docs/GPU_SETUP.md#troubleshooting) for:
-- Only 1 GPU active (enable tensor parallelism)
-- CUDA out of memory (lower memory utilization)
-- Imbalanced GPU usage (layer distribution issues)
+See [GPU_SETUP.md — Troubleshooting](GPU_SETUP.md#troubleshooting).
 
 ### BigQuery authentication
 ```bash
 gcloud auth application-default login
-# Or set GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json
+# or set GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json
 ```
-
-### Schema validation failures
-Check `SCHEMA_FIELDS` in `config.py` matches your target schema.
 
 ## References
 
-- [Architecture Design](extraction/docs/ARCHITECTURE.md)
+- [ARCHITECTURE.md](ARCHITECTURE.md) — module layout, legacy vs. live code
+- [TOOLS.md](TOOLS.md) — per-tool input/output reference
+- [PIPELINE_OPERATIONS.md](PIPELINE_OPERATIONS.md) — running, metrics, caching
+- [CLAUDE.md](CLAUDE.md) — operating notes and terminology
 - [Mosaic Extraction Reference](https://github.com/sarahwelsh99/mosaic-glean-extraction)
