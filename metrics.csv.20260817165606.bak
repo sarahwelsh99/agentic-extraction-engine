@@ -1,0 +1,2 @@
+ts,guid,source,batch_id,tool1_duration,tool1_elapsed,tool2_duration,tool2_elapsed,tool3_duration,tool3_elapsed,tool4_duration,tool4_elapsed,tool5_duration,tool5_elapsed,tool6_duration,tool6_elapsed,tool7_duration,tool7_elapsed,total_duration,total_rows_extracted,success
+2026-08-17T16:12:53.478482+00:00,138f0aba-e19b-5d91-fd7e-2281615b19cc,agentic,1,0.001,0.001,0.004,0.004,1.379,1.403,1.86,3.263,1.222,4.485,1.466,5.952,0,0,5.932,0,false

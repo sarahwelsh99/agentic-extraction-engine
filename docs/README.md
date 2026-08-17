@@ -114,7 +114,7 @@ See `extraction/config.py` for all configuration options. Key env variables:
 # Project & Infrastructure
 PROJECT_ID=your-gcp-project
 GCS_OUTPUT_BUCKET=your-bucket
-DATASET_ID=pii_extraction
+DATASET_ID=glean_extract
 
 # Data Source
 SOURCE_PROJECT=glean

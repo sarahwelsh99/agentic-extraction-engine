@@ -7,8 +7,9 @@ import os
 
 # ===== Project & Infrastructure =====
 PROJECT_ID = os.getenv("PROJECT_ID", "")
-DATASET_ID = os.getenv("DATASET_ID", "pii_extraction")
-GCS_OUTPUT_BUCKET = os.getenv("GCS_OUTPUT_BUCKET", "")
+DATASET_ID = os.getenv("DATASET_ID", "glean_extract")
+GCS_OUTPUT_BUCKET = os.getenv("GCS_OUTPUT_BUCKET", "glean-structured-agent-extraction")
+GCS_OUTPUT_PREFIX = os.getenv("GCS_OUTPUT_PREFIX", "extraction")
 GCS_LEDGER_PREFIX = os.getenv("GCS_LEDGER_PREFIX", "extraction-status-ledger")
 GCS_ARTIFACTS_PREFIX = os.getenv("GCS_ARTIFACTS_PREFIX", "extraction-artifacts")
 GCS_INPUT_PREFIX = os.getenv("GCS_INPUT_PREFIX", "extraction-input")
@@ -44,11 +45,23 @@ PHASE3_QUALITY_THRESHOLD = float(os.getenv("PHASE3_QUALITY_THRESHOLD", "0.85"))
 
 # Phase 4: Deterministic Execution
 QUEUE_MODE = os.getenv("QUEUE_MODE", "1") == "1"
-QUEUE_TARGET_BIN_GUIDS = int(os.getenv("QUEUE_TARGET_BIN_GUIDS", "15000"))
-QUEUE_DB_DIR = os.getenv("QUEUE_DB_DIR", "/tmp/extraction_queues")
 FETCH_BATCH_SIZE = int(os.getenv("FETCH_BATCH_SIZE", "500"))
+
+# A bin is three things at once: the unit prefetched from BigQuery, the unit
+# loaded in one BigQuery job, and the checkpoint a crash resumes from. Tied to
+# FETCH_BATCH_SIZE the way mosaic ties them, but at our value rather than
+# mosaic's 15,000: their unit of work is one LLM call, ours runs a container per
+# document, so a bin takes long enough that checkpointing 15,000 documents apart
+# would mean losing hours of work to one crash.
+QUEUE_TARGET_BIN_GUIDS = int(os.getenv("QUEUE_TARGET_BIN_GUIDS", str(FETCH_BATCH_SIZE)))
+QUEUE_DB_DIR = os.getenv("QUEUE_DB_DIR", "/tmp/extraction_queues")
 FETCH_MAX_BODY_BYTES = int(os.getenv("FETCH_MAX_BODY_BYTES", "500000000"))  # 500 MB
-MAX_WORKERS = int(os.getenv("MAX_WORKERS", "96"))
+
+# Documents processed concurrently. Deliberately not mosaic's 96: there a worker
+# waits on an LLM HTTP call and is I/O-bound, so oversubscribing cores is free.
+# Here a worker spawns a Docker container pinned to --cpus 1.0, so the pool is
+# CPU-bound and workers beyond the core count just make every container slower.
+MAX_WORKERS = int(os.getenv("MAX_WORKERS", "32"))
 WRITE_BATCH_SIZE = int(os.getenv("WRITE_BATCH_SIZE", "1000"))
 WRITE_BATCH_BYTES = int(os.getenv("WRITE_BATCH_BYTES", "10000000"))  # 10 MB
 

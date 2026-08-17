@@ -1,4 +1,5 @@
-"""Tool: load_to_bigquery
+"""Tool: load_to_bigquery — one table per document guid."""
 
-(To be implemented)
-"""
+from tools.load_to_bigquery.tool import LoadToBigQueryTool
+
+__all__ = ["LoadToBigQueryTool"]

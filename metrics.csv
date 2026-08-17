@@ -1,0 +1,7 @@
+ts,guid,source,batch_id,tool1_duration,tool1_elapsed,tool2_duration,tool2_elapsed,tool3_duration,tool3_elapsed,tool4_duration,tool4_elapsed,tool5_duration,tool5_elapsed,tool6_duration,tool6_elapsed,total_duration,total_rows_extracted,success
+2026-08-17T16:56:06.241267+00:00,000018b3-76b7-d84e-6506-4e5b22373260,agentic,1,0.0,0.001,0.0,0.001,0.905,0.925,0.348,1.274,0.0,1.274,2.621,3.895,3.876,483,true
+2026-08-17T17:46:27.478834+00:00,138f0aba-e19b-5d91-fd7e-2281615b19cc,agentic,1,0.001,0.001,0.004,0.004,0.925,0.949,0.339,1.289,0.0,1.289,2.533,3.822,3.802,5,true
+2026-08-17T20:14:57.678799+00:00,036d0d58-4ad0-f4cb-e8bd-9f313a591587,agentic,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,false
+2026-08-17T20:14:58.968058+00:00,3797ea97-d1c4-d2cc-134c-ef904c6b2770,agentic,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,false
+2026-08-17T20:42:26.598069+00:00,10fc6d28-c8a0-0523-acf1-d5ffe0117ec5,agentic,1,0.008,0.011,0.0,0.011,0,0,0,0,0,0,0,0,0.008,0,false
+2026-08-17T20:42:52.298675+00:00,f9db6849-8bc0-a71e-191d-2a973b55b4b1,agentic,1,0.02,0.034,0.006,0.047,0,0,0,0,0,0,0,0,0.026,0,false
