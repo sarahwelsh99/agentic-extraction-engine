@@ -117,7 +117,10 @@ class StructuralInspectorTool:
     name = "structural_inspector"
     description = "LLM-based structural spec: header/footer bounds, delimiter, null values"
 
-    MAX_TOKENS = 800
+    # A sheet with many candidate columns or a verbose footer_patterns list
+    # can produce a longer spec than a simple table's; 800 truncated one on a
+    # 109-line real sheet, which then failed to parse as JSON at all.
+    MAX_TOKENS = 1500
 
     def __init__(self):
         self.client = LocalLLMClient()
@@ -293,36 +296,69 @@ DOCUMENT:
 {body}
 """
 
+    @staticmethod
+    def _is_valid_json(text: Optional[str]) -> bool:
+        if not text:
+            return False
+        try:
+            json.loads(text)
+            return True
+        except json.JSONDecodeError:
+            return False
+
     def _call_llm(self, prompt: str) -> Optional[str]:
+        """Retries on a transport error, and also when the reply itself
+        isn't valid JSON (a truncated generation) - temperature 0.0 would
+        otherwise repeat the identical truncated output every attempt, so
+        retries after the first ask for some variation.
+        """
+        last_reply = None
         for attempt in range(self.max_retries):
             try:
-                return self.client.chat(
+                reply = self.client.chat(
                     [{"role": "user", "content": prompt}],
-                    temperature=0.0,
+                    temperature=0.0 if attempt == 0 else 0.2,
                     max_tokens=self.MAX_TOKENS,
                     json_schema=RESPONSE_SCHEMA,
                 )
             except (TimeoutError, RuntimeError) as e:
                 logger.warning(f"LLM call failed (attempt {attempt+1}/{self.max_retries}): {e}")
                 if attempt >= self.max_retries - 1:
-                    return None
-        return None
+                    return last_reply
+                continue
+
+            last_reply = reply
+            if self._is_valid_json(reply):
+                return reply
+            logger.warning(
+                f"LLM reply was not valid JSON (attempt {attempt+1}/{self.max_retries}), retrying"
+            )
+        return last_reply
 
     async def _acall_llm(self, prompt: str) -> Optional[str]:
         """Async twin of _call_llm, via LocalLLMClient.achat()."""
+        last_reply = None
         for attempt in range(self.max_retries):
             try:
-                return await self.client.achat(
+                reply = await self.client.achat(
                     [{"role": "user", "content": prompt}],
-                    temperature=0.0,
+                    temperature=0.0 if attempt == 0 else 0.2,
                     max_tokens=self.MAX_TOKENS,
                     json_schema=RESPONSE_SCHEMA,
                 )
             except (TimeoutError, RuntimeError) as e:
                 logger.warning(f"LLM call failed (attempt {attempt+1}/{self.max_retries}): {e}")
                 if attempt >= self.max_retries - 1:
-                    return None
-        return None
+                    return last_reply
+                continue
+
+            last_reply = reply
+            if self._is_valid_json(reply):
+                return reply
+            logger.warning(
+                f"LLM reply was not valid JSON (attempt {attempt+1}/{self.max_retries}), retrying"
+            )
+        return last_reply
 
     def _to_metadata_report(
         self, spec: Dict[str, Any], lines: List[str], inputs: Dict[str, Any]

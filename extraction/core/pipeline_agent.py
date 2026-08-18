@@ -173,6 +173,18 @@ class PipelineAgent:
 
     # ---------- Looker: fetch_and_sample (Micro-Slicer) + structural_inspector ----------
     async def _look(self) -> bool:
+        # A sheet with a name and a header marker but no data rows after it
+        # (routinely the workbook's last tab) reconstructs to an empty
+        # body_text in split_sheets(). That's "nothing to extract," not a
+        # missing input - reject it the same way structural_inspector
+        # already rejects a document with no data rows, rather than letting
+        # it reach fetch_and_sample's generic "must provide body_text" check.
+        if not self.body_text:
+            self.state.status = "rejected"
+            self.state.rejection_code = "NO_DATA_ROWS"
+            self.state.rejection_reason = "Sheet contained no data rows"
+            return False
+
         start = time.time()
         # Sync: fetch_and_sample does no network I/O when given body_text
         # directly, which is always how a per-sheet agent invokes it.

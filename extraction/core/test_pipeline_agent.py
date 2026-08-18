@@ -78,7 +78,10 @@ def _default_tools(**overrides):
 
 
 def _agent(guid="g", **tool_overrides):
-    return PipelineAgent(guid, tools=_default_tools(**tool_overrides), llm_session=FakeSession())
+    return PipelineAgent(
+        guid, body_text="id,name\n1,a",
+        tools=_default_tools(**tool_overrides), llm_session=FakeSession(),
+    )
 
 
 def _sheets_body(n: int) -> str:
@@ -118,6 +121,26 @@ def test_looker_rejection_stops_before_thinker():
     assert thinker.calls["n"] == 0, "the Thinker must never be called"
 
     print("✓ test_looker_rejection_stops_before_thinker PASSED")
+
+
+def test_empty_sheet_is_rejected_without_calling_any_tool():
+    """A sheet with a name/header marker but no data rows (routinely a
+    workbook's last tab) reconstructs to an empty body_text in
+    split_sheets(). That must be a clean rejection, not a hard failure from
+    fetch_and_sample's generic 'must provide body_text' input check."""
+    slicer = _fake_sync_tool(LOOK_OK)
+    agent = PipelineAgent(
+        "g", body_text="", tools=_default_tools(fetch_and_sample=slicer),
+        llm_session=FakeSession(),
+    )
+
+    state = asyncio.run(agent.run())
+
+    assert state.status == "rejected"
+    assert state.rejection_code == "NO_DATA_ROWS"
+    assert slicer.calls["n"] == 0, "fetch_and_sample must never be called for an empty sheet"
+
+    print("✓ test_empty_sheet_is_rejected_without_calling_any_tool PASSED")
 
 
 def test_retry_loop_recovers_on_the_second_attempt():
@@ -234,6 +257,7 @@ def run_all_tests():
     tests = [
         test_successful_run_in_one_attempt,
         test_looker_rejection_stops_before_thinker,
+        test_empty_sheet_is_rejected_without_calling_any_tool,
         test_retry_loop_recovers_on_the_second_attempt,
         test_retry_ceiling_stops_the_loop,
         test_eval_says_no_retry_stops_immediately,
