@@ -19,6 +19,13 @@ The regex/heuristic tool `structural_inspector` replaced, and the BigQuery
 loader `write_parquet_to_gcs` replaced, are both archived at `retired/` —
 see `retired/README.md` for why each was superseded.
 
+Tools 2-4 (the ones that do real I/O - an LLM call, or the Docker sandbox)
+each expose an async `acall(inputs)` alongside their sync `__call__`, with
+the same contract either way; see `docs/ARCHITECTURE.md`'s "Sheets and
+concurrency" for why (a workbook can flatten several worksheets into one
+document, and `pipeline_agent.run_document()` runs one full Looker→Thinker→
+Tester→Eval loop per sheet concurrently).
+
 ## Tool 1 — fetch_and_sample
 
 Reuses `mosaic-glean-extraction`'s batch-fetching logic against

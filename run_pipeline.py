@@ -12,6 +12,7 @@ Usage:
 """
 
 import argparse
+import asyncio
 import datetime
 import json
 import logging
@@ -19,7 +20,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 # Configure logging FIRST before any imports that use logger
 logging.basicConfig(
@@ -34,7 +35,7 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 
 from tools import get_tool_by_name
 from extraction.metrics_recorder import record_pipeline_run
-from extraction.core.pipeline_agent import PipelineAgent, PipelineState
+from extraction.core.pipeline_agent import PipelineState, run_document
 
 
 def _require_tool(name: str):
@@ -194,10 +195,19 @@ def _stage_metadata(stage: str, response: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _record_stage_log(metrics: PipelineMetrics, state: PipelineState,
-                      batch_start_time: float) -> None:
-    """Feed the agent's own stage_log into this run's PipelineMetrics."""
+                      batch_start_time: float, tag_sheet: bool) -> None:
+    """Feed the agent's own stage_log into this run's PipelineMetrics.
+
+    tag_sheet: true when the document produced more than one sheet, so each
+    sheet's stages get their own key (metrics.stages is a plain dict keyed by
+    label - without this, a multi-sheet document's sheets would overwrite
+    each other's timing under the same "Tool 3: ..." key). A single-sheet
+    document's labels are untouched, so metrics_recorder.py's per-tool CSV
+    columns keep matching exactly as they do today.
+    """
+    suffix = f" [{state.sheet_name or 'unnamed'}]" if tag_sheet else ""
     for entry in state.stage_log:
-        label = _STAGE_LABELS.get(entry["stage"], entry["stage"])
+        label = _STAGE_LABELS.get(entry["stage"], entry["stage"]) + suffix
         status = "success" if entry["status"] == "success" else "error"
         metrics.record_stage(
             label, entry["start"], entry["end"], status,
@@ -209,8 +219,44 @@ def _record_stage_log(metrics: PipelineMetrics, state: PipelineState,
             metrics.record_error(label, entry["response"].get("error"))
 
 
+_STAGE_TO_STEP = {
+    "look_slice": "look", "look_inspect": "look",
+    "think": "think", "test": "test", "eval": "eval",
+}
+
+
+def _stage_failed(state: PipelineState) -> Optional[str]:
+    """Which step (look/think/test/eval) a non-passing sheet stopped at."""
+    if state.status == "success" or not state.stage_log:
+        return None
+    return _STAGE_TO_STEP.get(state.stage_log[-1]["stage"], state.stage_log[-1]["stage"])
+
+
+def _sheet_summary(state: PipelineState) -> Dict[str, Any]:
+    """The per-sheet breakdown surfaced in results["sheets"] - which sheet,
+    whether it passed, and if not, exactly where and why."""
+    return {
+        "sheet_name": state.sheet_name,
+        "status": state.status,
+        "stage_failed": _stage_failed(state),
+        "failure_reason": (
+            state.rejection_reason if state.status == "rejected" else state.failure_reason
+        ),
+        "rows_extracted": len(state.extracted_rows),
+    }
+
+
 def run_pipeline(guid: str, body_text: str = None, load: bool = True) -> dict:
     """Run the complete extraction pipeline: the agent loop, then delivery.
+
+    A document may carry more than one worksheet (extraction/core/records.py's
+    split_sheets()); run_document() fans those out concurrently, one full
+    Looker->Thinker->Tester->Eval loop per sheet. Partial success counts: if
+    at least one sheet passes, this document is delivered and marked
+    complete, with the passing sheets' rows tagged by _sheet_name and every
+    sheet's own outcome (pass/fail/rejected, which step, why) reported under
+    results["sheets"] - see run_corpus.py for how that detail surfaces in the
+    status table.
 
     Args:
         guid: Document GUID to extract
@@ -229,31 +275,54 @@ def run_pipeline(guid: str, body_text: str = None, load: bool = True) -> dict:
     logger.info(f"Starting pipeline for guid: {guid}")
     logger.info("=" * 80)
 
-    agent = PipelineAgent(guid, body_text=body_text)
-    state = agent.run()
-    _record_stage_log(metrics, state, batch_start_time)
-    results["stages"] = {e["stage"]: e["response"] for e in state.stage_log}
+    # This is the sync/async boundary: run_document() and everything it
+    # drives (PipelineAgent, the tools' acall() methods) is async so a
+    # document's sheets run concurrently; everything above this line (this
+    # function, run_corpus.py, the CLI) stays synchronous.
+    states: List[PipelineState] = asyncio.run(run_document(guid, body_text))
+    multi_sheet = len(states) > 1
 
-    if state.status == "rejected":
-        logger.warning(f"⊘ Document rejected [{state.rejection_code}]: {state.rejection_reason}")
-        results["rejected"] = True
-        results["rejection_code"] = state.rejection_code
-        results["rejection_reason"] = state.rejection_reason
+    all_stage_entries = []
+    for state in states:
+        _record_stage_log(metrics, state, batch_start_time, tag_sheet=multi_sheet)
+        all_stage_entries.extend(state.stage_log)
+    results["stages"] = {e["stage"]: e["response"] for e in all_stage_entries}
+    results["sheets"] = [_sheet_summary(s) for s in states]
+
+    passing = [s for s in states if s.status == "success"]
+
+    if not passing:
+        if all(s.status == "rejected" for s in states):
+            primary = states[0]
+            logger.warning(f"⊘ Document rejected [{primary.rejection_code}]: {primary.rejection_reason}")
+            results["rejected"] = True
+            results["rejection_code"] = primary.rejection_code
+            results["rejection_reason"] = primary.rejection_reason
+        else:
+            failed = next((s for s in states if s.status == "failed"), states[0])
+            logger.warning(
+                f"⊘ Extraction did not pass ({len(states)} sheet(s), 0 passed): "
+                f"{failed.failure_reason}"
+            )
+            results["extraction_passed"] = False
+            results["failure_reason"] = failed.failure_reason
         _record_failure(guid, metrics)
         return {**results, "metrics": metrics.summary()}
 
-    if state.status != "success":
-        logger.warning(f"⊘ Extraction did not pass after {state.retry_count} attempt(s)")
-        results["extraction_passed"] = False
-        results["failure_reason"] = state.failure_reason
-        _record_failure(guid, metrics)
-        return {**results, "metrics": metrics.summary()}
+    # Every passing sheet's rows, tagged by sheet when there was more than
+    # one - an ordinary single-table document's rows are untouched.
+    extracted_rows = []
+    for state in passing:
+        rows = state.extracted_rows
+        if multi_sheet:
+            rows = [{**row, "_sheet_name": state.sheet_name} for row in rows]
+        extracted_rows.extend(rows)
 
     logger.info(
-        f"✓ Extraction PASSED after {state.retry_count} attempt(s): "
-        f"{len(state.extracted_rows)} row(s)"
+        f"✓ Extraction PASSED: {len(passing)}/{len(states)} sheet(s), "
+        f"{len(extracted_rows)} row(s)"
     )
-    metrics.total_rows_extracted = len(state.extracted_rows)
+    metrics.total_rows_extracted = len(extracted_rows)
 
     # ==================== Deliver: write_parquet_to_gcs ====================
     # Only a passing extraction is written. A corpus run batches delivery
@@ -261,10 +330,10 @@ def run_pipeline(guid: str, body_text: str = None, load: bool = True) -> dict:
     # run_corpus.py), so it asks for the rows back rather than writing here.
     if not load:
         results["extraction_passed"] = True
-        results["extracted_rows"] = state.extracted_rows
+        results["extracted_rows"] = extracted_rows
         results["success"] = True
         results["metrics"] = metrics.summary()
-        logger.info(f"Extraction complete, {len(state.extracted_rows)} row(s) left to the caller to write")
+        logger.info(f"Extraction complete, {len(extracted_rows)} row(s) left to the caller to write")
         return results
 
     try:
@@ -274,7 +343,7 @@ def run_pipeline(guid: str, body_text: str = None, load: bool = True) -> dict:
         tool6 = _require_tool("write_parquet_to_gcs")
         write_response = json.loads(tool6({
             "guid": guid,
-            "extracted_rows": state.extracted_rows,
+            "extracted_rows": extracted_rows,
         }))
         write_end = time.time()
 

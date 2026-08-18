@@ -21,6 +21,7 @@ documents would grow the conversation (and the token cost) forever.
 import logging
 import json
 from typing import Optional, Dict, Any
+import httpx
 import requests
 from . import config
 
@@ -131,6 +132,44 @@ class LocalLLMClient:
         except requests.exceptions.RequestException as e:
             raise RuntimeError(f"vLLM request failed: {e}")
 
+    async def achat(self,
+                     messages: list,
+                     temperature: float = 0.0,
+                     max_tokens: int = 2000,
+                     json_schema: Optional[Dict] = None) -> str:
+        """Async twin of chat(), for callers running under asyncio (the
+        per-sheet fan-out in extraction/core/pipeline_agent.py). Same
+        payload, same response shape, same error mapping - built on
+        httpx.AsyncClient instead of requests so the request doesn't block
+        the event loop.
+        """
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+        if json_schema:
+            payload["response_format"] = {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "response",
+                    "schema": json_schema,
+                    "strict": True
+                }
+            }
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.post(self.completions_url, json=payload)
+                response.raise_for_status()
+                result = response.json()
+                return result["choices"][0]["message"]["content"]
+        except httpx.TimeoutException:
+            raise TimeoutError(f"vLLM request timed out after {self.timeout}s")
+        except httpx.HTTPError as e:
+            raise RuntimeError(f"vLLM request failed: {e}")
+
     def generate(self,
                  prompt: str,
                  system_prompt: Optional[str] = None,
@@ -199,6 +238,17 @@ class LLMSession:
         self.messages.append({"role": "user", "content": prompt})
         try:
             reply = self.client.chat(self.messages, temperature, max_tokens)
+        except Exception:
+            self.messages.pop()
+            raise
+        self.messages.append({"role": "assistant", "content": reply})
+        return reply
+
+    async def asend(self, prompt: str, temperature: float = 0.0, max_tokens: int = 2000) -> str:
+        """Async twin of send(), same turn bookkeeping, via client.achat()."""
+        self.messages.append({"role": "user", "content": prompt})
+        try:
+            reply = await self.client.achat(self.messages, temperature, max_tokens)
         except Exception:
             self.messages.pop()
             raise

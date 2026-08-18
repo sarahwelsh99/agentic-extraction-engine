@@ -11,6 +11,7 @@ Output: Python class exposing DataExtractor.parse_row
 import ast
 import json
 import re
+import httpx
 import requests
 import time
 import logging
@@ -51,119 +52,182 @@ class GenerateParserScriptTool:
             JSON string with generated code and metadata
         """
         try:
-            guid = inputs.get("guid", "unknown")
-            raw_sample = inputs.get("raw_sample", "")
-            report = inputs.get("metadata_report") or {}
-            # Set by Tool 5 when an earlier attempt failed: what went wrong, so
-            # this attempt can avoid it.
-            feedback = inputs.get("feedback")
-            attempt = int(inputs.get("attempt", 1))
-            # Optional LLMSession spanning this document's whole retry loop
-            # (see run_pipeline.py). When given, a retry is a short follow-up
-            # turn against the code and failure already in the conversation
-            # rather than a prompt rebuilt from scratch each attempt.
-            session = inputs.get("session")
+            prep = self._prepare(inputs)
+            if isinstance(prep, str):
+                return prep
+            guid, report, feedback, attempt, session, raw_sample, cache, cache_key, cached = prep
 
-            if not report:
-                return json.dumps({
-                    "status": "error",
-                    "error": "Missing metadata_report in input",
-                })
+            if cached is not None:
+                return self._finalize(guid, attempt, feedback, report, cached,
+                                      cache_hit=True, generation_time=0.0, cache=cache)
 
-            if inputs.get("rejected"):
-                return json.dumps({
-                    "status": "skipped",
-                    "guid": guid,
-                    "error": inputs.get("rejection_reason")
-                             or "Document rejected by structure detection",
-                })
+            # Call vLLM to generate code - statefully, if a session was given
+            start_time = time.time()
+            generated_code = self._generate_code(
+                report, raw_sample, feedback, session,
+                max_tokens=self._output_budget(report),
+            )
+            generation_time = time.time() - start_time
 
-            # Key the cache on the structure that shapes the code: two documents
-            # with the same delimiter and the same header parse identically.
-            cache_key = self._cache_key(report)
-
-            # ===== CHECK CACHE FIRST =====
-            cache = get_cache()
-            cache_hit = False
-            generation_time = 0.0
-
-            # A retry must not be served the script that just failed. The cache
-            # is keyed on document shape, which has not changed, so a hit would
-            # return the same broken code and the retry would be a no-op.
-            generated_code = None if feedback else cache.get(cache_key)
-            if generated_code:
-                cache_hit = True
-                logger.info(f"Cache HIT for guid {guid}")
-            else:
-                # Call vLLM to generate code - statefully, if a session was given
-                start_time = time.time()
-                generated_code = self._generate_code(
-                    report, raw_sample, feedback, session,
-                    max_tokens=self._output_budget(report),
-                )
-                generation_time = time.time() - start_time
-
-                if not generated_code:
-                    return json.dumps({
-                        "status": "error",
-                        "error": "Failed to generate code from vLLM",
-                    })
-
-                # Never cache code that cannot work: a cached bad parser is
-                # served forever for every document sharing this schema.
-                defect = self._validate_extractor(generated_code)
-                if defect:
-                    return json.dumps({
-                        "status": "error",
-                        "guid": guid,
-                        "error": f"Generated code rejected: {defect}",
-                    })
-
-                # ===== STORE IN CACHE =====
-                # A retry replaces the entry that failed, so the next document
-                # of this shape gets the better script rather than the bad one.
-                cache.set(cache_key, generated_code)
-                cache.cleanup_if_needed()
-                logger.info(f"Cache MISS → vLLM generated + cached for guid {guid}")
-
-            # Validate generated code
-            is_valid = self._validate_python_syntax(generated_code)
-
-            return json.dumps({
-                "status": "success",
-                "guid": guid,
-                "cache_hit": cache_hit,
-                "attempt": attempt,
-                "regenerated_after_failure": bool(feedback),
-                "generation_time_sec": round(generation_time, 2),
-                "generated_code": {
-                    "language": "python",
-                    "code": generated_code,
-                    "format_spec": {
-                        "source_format": report.get("format", "csv"),
-                        "delimiter": report.get("delimiter", ","),
-                        "encoding": report.get("encoding", "utf-8"),
-                        "has_header": report.get("header_source") == "row",
-                        "header_row": report.get("header_row_index", 0),
-                        "field_count": report.get("header_field_count", 0),
-                    },
-                    "syntax_valid": is_valid,
-                },
-                "code_quality": {
-                    "has_type_hints": "from typing import" in generated_code,
-                    "has_error_handling": "except" in generated_code,
-                    "has_validation": "validate" in generated_code.lower(),
-                    "has_documentation": '"""' in generated_code or "'''" in generated_code,
-                    "has_row_tracking": "_row" in generated_code or "row_num" in generated_code,
-                    "generated_by": "cache" if cache_hit else "vLLM",
-                },
-            }, indent=2)
+            return self._finalize(guid, attempt, feedback, report, generated_code,
+                                  cache_hit=False, generation_time=generation_time,
+                                  cache=cache, cache_key=cache_key)
 
         except Exception as e:
             return json.dumps({
                 "status": "error",
                 "error": str(e),
             })
+
+    async def acall(self, inputs: Dict[str, Any]) -> str:
+        """Async twin of __call__, for the per-sheet fan-out in
+        extraction/core/pipeline_agent.py. Same cache-then-generate contract,
+        same response shape - only the vLLM call itself runs on the event
+        loop instead of blocking a thread.
+        """
+        try:
+            prep = self._prepare(inputs)
+            if isinstance(prep, str):
+                return prep
+            guid, report, feedback, attempt, session, raw_sample, cache, cache_key, cached = prep
+
+            if cached is not None:
+                return self._finalize(guid, attempt, feedback, report, cached,
+                                      cache_hit=True, generation_time=0.0, cache=cache)
+
+            start_time = time.time()
+            generated_code = await self._agenerate_code(
+                report, raw_sample, feedback, session,
+                max_tokens=self._output_budget(report),
+            )
+            generation_time = time.time() - start_time
+
+            return self._finalize(guid, attempt, feedback, report, generated_code,
+                                  cache_hit=False, generation_time=generation_time,
+                                  cache=cache, cache_key=cache_key)
+
+        except Exception as e:
+            return json.dumps({
+                "status": "error",
+                "error": str(e),
+            })
+
+    def _prepare(self, inputs: Dict[str, Any]):
+        """Validate input and check the cache.
+
+        Returns:
+            (guid, report, feedback, attempt, session, raw_sample, cache,
+            cache_key, cached) on success - cached is the cached code, or
+            None on a miss - or an already-JSON-encoded error/skip string.
+            Shared by __call__ and acall so neither duplicates input
+            validation or the cache lookup.
+        """
+        guid = inputs.get("guid", "unknown")
+        raw_sample = inputs.get("raw_sample", "")
+        report = inputs.get("metadata_report") or {}
+        # Set by Tool 5 when an earlier attempt failed: what went wrong, so
+        # this attempt can avoid it.
+        feedback = inputs.get("feedback")
+        attempt = int(inputs.get("attempt", 1))
+        # Optional LLMSession spanning this document's whole retry loop
+        # (see run_pipeline.py). When given, a retry is a short follow-up
+        # turn against the code and failure already in the conversation
+        # rather than a prompt rebuilt from scratch each attempt.
+        session = inputs.get("session")
+
+        if not report:
+            return json.dumps({
+                "status": "error",
+                "error": "Missing metadata_report in input",
+            })
+
+        if inputs.get("rejected"):
+            return json.dumps({
+                "status": "skipped",
+                "guid": guid,
+                "error": inputs.get("rejection_reason")
+                         or "Document rejected by structure detection",
+            })
+
+        # Key the cache on the structure that shapes the code: two documents
+        # with the same delimiter and the same header parse identically.
+        cache_key = self._cache_key(report)
+        cache = get_cache()
+
+        # A retry must not be served the script that just failed. The cache
+        # is keyed on document shape, which has not changed, so a hit would
+        # return the same broken code and the retry would be a no-op.
+        cached = None if feedback else cache.get(cache_key)
+        if cached:
+            logger.info(f"Cache HIT for guid {guid}")
+
+        return guid, report, feedback, attempt, session, raw_sample, cache, cache_key, cached
+
+    def _finalize(
+        self, guid: str, attempt: int, feedback: Optional[str], report: Dict,
+        generated_code: Optional[str], cache_hit: bool, generation_time: float,
+        cache=None, cache_key: Optional[Dict] = None,
+    ) -> str:
+        """Validate (on a cache miss), cache, and build the response JSON.
+
+        Shared by __call__ and acall - by the time either calls this, the
+        vLLM call (sync or async) has already happened; everything left is
+        the same regardless of how the code was obtained.
+        """
+        if not generated_code:
+            return json.dumps({
+                "status": "error",
+                "error": "Failed to generate code from vLLM",
+            })
+
+        if not cache_hit:
+            # Never cache code that cannot work: a cached bad parser is
+            # served forever for every document sharing this schema.
+            defect = self._validate_extractor(generated_code)
+            if defect:
+                return json.dumps({
+                    "status": "error",
+                    "guid": guid,
+                    "error": f"Generated code rejected: {defect}",
+                })
+
+            # A retry replaces the entry that failed, so the next document
+            # of this shape gets the better script rather than the bad one.
+            cache.set(cache_key, generated_code)
+            cache.cleanup_if_needed()
+            logger.info(f"Cache MISS → vLLM generated + cached for guid {guid}")
+
+        is_valid = self._validate_python_syntax(generated_code)
+
+        return json.dumps({
+            "status": "success",
+            "guid": guid,
+            "cache_hit": cache_hit,
+            "attempt": attempt,
+            "regenerated_after_failure": bool(feedback),
+            "generation_time_sec": round(generation_time, 2),
+            "generated_code": {
+                "language": "python",
+                "code": generated_code,
+                "format_spec": {
+                    "source_format": report.get("format", "csv"),
+                    "delimiter": report.get("delimiter", ","),
+                    "encoding": report.get("encoding", "utf-8"),
+                    "has_header": report.get("header_source") == "row",
+                    "header_row": report.get("header_row_index", 0),
+                    "field_count": report.get("header_field_count", 0),
+                },
+                "syntax_valid": is_valid,
+            },
+            "code_quality": {
+                "has_type_hints": "from typing import" in generated_code,
+                "has_error_handling": "except" in generated_code,
+                "has_validation": "validate" in generated_code.lower(),
+                "has_documentation": '"""' in generated_code or "'''" in generated_code,
+                "has_row_tracking": "_row" in generated_code or "row_num" in generated_code,
+                "generated_by": "cache" if cache_hit else "vLLM",
+            },
+        }, indent=2)
 
     # Bounds on the two interpolated values. Without them the prompt is
     # unbounded in both the schema block and the sample: on real documents it
@@ -229,6 +293,40 @@ class GenerateParserScriptTool:
         for attempt in range(self.max_retries):
             try:
                 text = session.send(prompt, temperature=0.3, max_tokens=max_tokens)
+            except (TimeoutError, RuntimeError) as e:
+                logger.error(f"LLM session error (attempt {attempt+1}/{self.max_retries}): {e}")
+                if attempt >= self.max_retries - 1:
+                    raise
+                continue
+            code = self._extract_code(text)
+            if code:
+                return code
+        return code
+
+    async def _agenerate_code(self, report: Dict, sample: str, feedback: Optional[str],
+                               session, max_tokens: int) -> Optional[str]:
+        """Async twin of _generate_code, via session.asend() / _acall_vllm()."""
+        if session is not None and session.messages:
+            prompt = (
+                "That attempt failed: "
+                f"{(feedback or 'unknown error')[: self.MAX_FEEDBACK_CHARS]}\n\n"
+                "Fix the DataExtractor class and return the complete corrected "
+                "code. Output ONLY executable Python code - no explanations, "
+                "no markdown fences."
+            )
+        else:
+            prompt = self._build_prompt(report, sample, feedback)
+
+        if session is not None:
+            return await self._acall_session(session, prompt, max_tokens)
+        return await self._acall_vllm(prompt, max_tokens=max_tokens)
+
+    async def _acall_session(self, session, prompt: str, max_tokens: int) -> Optional[str]:
+        """Async twin of _call_session, via LLMSession.asend()."""
+        code = None
+        for attempt in range(self.max_retries):
+            try:
+                text = await session.asend(prompt, temperature=0.3, max_tokens=max_tokens)
             except (TimeoutError, RuntimeError) as e:
                 logger.error(f"LLM session error (attempt {attempt+1}/{self.max_retries}): {e}")
                 if attempt >= self.max_retries - 1:
@@ -406,6 +504,53 @@ CODE:
                     if attempt < self.max_retries - 1:
                         continue
                     raise
+
+        except Exception as e:
+            logger.error(f"vLLM error: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return None
+
+        return None
+
+    async def _acall_vllm(self, prompt: str, max_tokens: int = 2000) -> Optional[str]:
+        """Async twin of _call_vllm, via httpx.AsyncClient instead of requests."""
+        url = f"{self.vllm_base}/v1/completions"
+
+        payload = {
+            "model": self.vllm_model,
+            "prompt": prompt,
+            "max_tokens": max_tokens,
+            "temperature": 0.3,
+            "top_p": 0.95,
+        }
+
+        logger.debug(f"vLLM request (async): {url}, model={self.vllm_model}, prompt_len={len(prompt)}")
+
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                for attempt in range(self.max_retries):
+                    try:
+                        response = await client.post(url, json=payload)
+                        response.raise_for_status()
+
+                        result = response.json()
+                        if "choices" in result and len(result["choices"]) > 0:
+                            text = result["choices"][0].get("text", "").strip()
+
+                            code = self._extract_code(text)
+                            if code:
+                                return code
+
+                    except httpx.TimeoutException:
+                        if attempt < self.max_retries - 1:
+                            continue
+                        raise
+                    except httpx.HTTPError as e:
+                        logger.error(f"vLLM request error (attempt {attempt+1}/{self.max_retries}): {e}")
+                        if attempt < self.max_retries - 1:
+                            continue
+                        raise
 
         except Exception as e:
             logger.error(f"vLLM error: {e}")

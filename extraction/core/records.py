@@ -15,7 +15,8 @@ different cells than the ones handed to the generated code, and every blank
 line became a phantom row that reported all fields missing.
 """
 
-from typing import List, Tuple
+from dataclasses import dataclass
+from typing import List, Optional, Tuple
 
 # U+2000 EN QUAD, then SOH, then NUL. Built from code points on purpose: the
 # leading character is not an ASCII space, and it does not survive copy/paste
@@ -82,3 +83,104 @@ def split_records(body_text: str) -> Tuple[List[str], List[str]]:
             records.append(row)
 
     return records, sheets
+
+
+@dataclass
+class SheetBlock:
+    """One worksheet's own slice of a flattened multi-tab document.
+
+    `body_text` is already a valid flattened snippet (rows joined by
+    ROW_SEPARATOR) scoped to this sheet alone, so it can be handed straight
+    back into fetch_and_sample/structural_inspector/sandbox_execute exactly
+    as if it were the whole document - none of those need to know sheets
+    exist at all.
+    """
+    name: Optional[str]
+    body_text: str
+
+
+def split_sheets(body_text: str) -> List[SheetBlock]:
+    """Split a flattened document into its worksheets, preserving position.
+
+    split_records() already recognizes SHEET_MARKER-terminated rows, but only
+    to collect names into a side list - it discards *where* a sheet's data
+    begins and ends, so every sheet's rows land in one flat, unattributed
+    list. This walks the same rows but keeps that boundary: a marker row
+    starts a new sheet and supplies its name; a document is commonly flattened
+    with a second marker-terminated row right after the name (that sheet's
+    own candidate header), which is kept as that sheet's own first line
+    rather than treated as another sheet - the Structural Inspector resolves
+    whether it's a real header exactly as it already does for a
+    single-table document.
+
+    A sheet's own last line is genuinely its own tail (not a slice of the
+    whole document's end), which matters for the Micro-Slicer's tail window.
+
+    Returns:
+        One SheetBlock per detected worksheet, in document order. A document
+        with no SHEET_MARKER rows at all (an ordinary, non-workbook source)
+        returns a single SheetBlock(name=None, body_text=<original text>),
+        so callers never need to special-case "not actually multi-sheet".
+    """
+    if not body_text:
+        return [SheetBlock(name=None, body_text=body_text or "")]
+
+    # Fast path: no SHEET_MARKER at all means an ordinary, non-workbook
+    # document - the overwhelming majority. Returned completely untouched,
+    # rather than reconstructed through the row-by-row loop below, which
+    # both matches today's behavior exactly and costs nothing extra.
+    if SHEET_MARKER not in body_text:
+        return [SheetBlock(name=None, body_text=body_text)]
+
+    rows = (
+        body_text.split(ROW_SEPARATOR)
+        if ROW_SEPARATOR in body_text
+        else body_text.split("\n")
+    )
+
+    blocks: List[SheetBlock] = []
+    current_name: Optional[str] = None
+    current_lines: List[str] = []
+    in_marker_run = False
+
+    def flush() -> None:
+        if current_lines or current_name is not None:
+            blocks.append(SheetBlock(
+                name=current_name, body_text=ROW_SEPARATOR.join(current_lines),
+            ))
+
+    for row in rows:
+        if row.endswith(SHEET_MARKER):
+            text = row[: -len(SHEET_MARKER)]
+            if not in_marker_run:
+                flush()
+                current_name = text
+                current_lines = []
+                in_marker_run = True
+            else:
+                # A marker row immediately following another one (the
+                # sheet's own header line, typically) is this sheet's
+                # content, not a second sheet name.
+                cleaned = strip_zero_width(text.replace(CELL_NEWLINE, " ")).strip()
+                if cleaned:
+                    current_lines.append(cleaned)
+            continue
+
+        in_marker_run = False
+        cleaned = strip_zero_width(row.replace(CELL_NEWLINE, " ")).strip()
+        if cleaned:
+            current_lines.append(cleaned)
+
+    flush()
+
+    return blocks or [SheetBlock(name=None, body_text=body_text)]
+
+
+def has_multiple_sheets(body_text: str) -> bool:
+    """True iff the document names more than one worksheet.
+
+    A document with a single sheet marker, or none, is single-sheet: there is
+    nothing to fan out per sheet, so it takes the ordinary single-document
+    path at no extra cost.
+    """
+    return len(split_sheets(body_text)) > 1

@@ -23,6 +23,15 @@ copies that had to be kept in sync by hand. A passing result is delivered by
 they aren't wired to anything and `orchestrator.py`'s own imports are
 already broken.
 
+A document that flattens more than one worksheet into its `body_text` (one
+tab per agent/region/etc.) is fanned out per sheet by
+`pipeline_agent.run_document()` — one whole agent loop each, run
+concurrently, not one loop over a blended, cross-sheet mess. **Partial
+success counts**: a guid is delivered and marked complete if at least one
+sheet passed, with each sheet's own pass/fail/rejected outcome (and which
+step it failed at) visible in `run_pipeline()`'s `results["sheets"]`. See
+"Sheets and concurrency" in [ARCHITECTURE.md](ARCHITECTURE.md).
+
 ### Data Source Terminology
 
 All data comes from `glean.drive_files` filtered by:
@@ -172,6 +181,15 @@ regardless of how many share a delimiter.
 everyone using that file, including cached parsers other work depends on.
 Fine in a test's own temp cache or a throwaway environment; don't run it
 against the shared `cache/` directory casually.
+
+### Mistake 5: Reading `metadata_report`/`extracted_rows` as if a guid is one document
+A multi-sheet guid produces one `metadata_report` and one generated parser
+*per sheet*, not one for the whole document — the fields you'd read off Tool
+2's report (delimiter, header names, ...) describe a single sheet, not the
+guid as a whole. `run_pipeline()`'s `results["sheets"]` is the per-sheet
+breakdown; `extracted_rows` carries `_sheet_name` on each row once a
+document has more than one sheet, so grouping by that key recovers which
+sheet a row came from.
 
 ## Cost / performance intuition
 
