@@ -29,11 +29,19 @@ class FetchAndSampleTool(AgentTool):
     # The Micro-Slicer's window: the Looker's LLM call needs the document's
     # complete bounding box (where it starts and where it ends), not a spread
     # sample from the middle, so this is a literal head+tail slice rather than
-    # sample_size-controlled. Bounded in bytes too, so an enormous document
-    # still produces a small, LLM-priced slice.
+    # sample_size-controlled. Bounded in bytes too, so a pathological document
+    # (one absurdly long cell) still can't blow up the prompt - but the bound
+    # itself should reflect what the model can actually take, not an arbitrary
+    # small number: the served model has a 65,536-token context, so 4KB was
+    # needlessly tight and cost a real header line - a 60-line micro-slice
+    # only slightly over that cap got every line, including the header,
+    # uniformly truncated mid-word ("Language" -> "Lang"), which starved both
+    # the model's own read of the header *and* _to_metadata_report's
+    # mechanical fallback of the same truncated line. 32KB comfortably covers
+    # realistic wide headers with room to spare against that context window.
     MICRO_SLICE_HEAD_LINES = 40
     MICRO_SLICE_TAIL_LINES = 20
-    MICRO_SLICE_MAX_BYTES = 4096
+    MICRO_SLICE_MAX_BYTES = 32768
 
     @property
     def name(self) -> str:
@@ -363,20 +371,35 @@ class FetchAndSampleTool(AgentTool):
 
         max_bytes bounds what is carried forward, not what is read: truncating
         the document before sampling would confine the sample to its opening
-        rows. Every sampled record is kept, each shortened to an equal share, so
-        a single enormous record cannot crowd the others out.
+        rows. Every sampled record is kept - but not by capping each to an
+        equal share regardless of length. A short header line and one
+        enormous comment cell used to be trimmed to the identical byte cap,
+        which cost the header real column names for no reason: it was nowhere
+        near using its share. This is max-min fair instead: lines are
+        considered shortest-first, each kept whole if it fits the budget still
+        left divided among the lines remaining, so a short line is never
+        touched while it doesn't need to be, and only the genuinely long
+        outliers absorb the trim.
         """
-        if not sampled or len(("\n".join(sampled)).encode(encoding)) <= max_bytes:
+        encoded = [r.encode(encoding) for r in sampled]
+        separators = max(0, len(encoded) - 1)  # the "\n" joining each pair
+        if not encoded or sum(len(e) for e in encoded) + separators <= max_bytes:
             return sampled
 
-        per_record = max(1, max_bytes // len(sampled) - 1)
-        trimmed = []
-        for record in sampled:
-            encoded = record.encode(encoding)
-            if len(encoded) > per_record:
-                record = encoded[:per_record].decode(encoding, errors="ignore")
-            trimmed.append(record)
-        return trimmed
+        budget = max(0, max_bytes - separators)
+        order = sorted(range(len(encoded)), key=lambda i: len(encoded[i]))
+        caps = [0] * len(encoded)
+        remaining = budget
+        for rank, i in enumerate(order):
+            share = max(1, remaining // (len(order) - rank))
+            length = len(encoded[i])
+            caps[i] = min(length, share)
+            remaining -= caps[i]
+
+        return [
+            e[:caps[i]].decode(encoding, errors="ignore")
+            for i, e in enumerate(encoded)
+        ]
 
     def _split_records(self, body_text: str) -> tuple[List[str], List[str]]:
         """Split a flattened workbook into records and worksheet names.

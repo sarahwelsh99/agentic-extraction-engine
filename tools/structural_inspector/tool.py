@@ -379,7 +379,6 @@ DOCUMENT:
         quote_char = fmt.get("quote_char")
 
         has_header = bool(head.get("has_header"))
-        header_names = list(head.get("inferred_columns") or [])
         header_row_index = head.get("header_line_index", 0) if has_header else -1
         header_source = "row" if has_header else "positional"
 
@@ -390,6 +389,22 @@ DOCUMENT:
 
         widths = [len(self._split(line, delimiter, quote_char)) for line in data_lines] or [0]
         modal_field_count = Counter(widths).most_common(1)[0][0]
+
+        # The model judges *where* the header is - a judgement call it's good
+        # at. Reading it is not: asking it to also retype every cell as
+        # inferred_columns is the same failure the position-based Thinker
+        # contract exists to avoid elsewhere (see generate_parser_script's own
+        # docstring) - on a real 18-field header it named 6 correctly, mangled
+        # a 7th ("Language" -> "Lang"), and gave up on the remaining 11 as
+        # "Column8".."Column10". So the header line itself, once located, is
+        # split here mechanically - complete and verbatim - rather than
+        # trusting the model's summary of it.
+        if has_header and 0 <= header_row_index < len(lines):
+            header_names = self._unique_names(
+                self._split(lines[header_row_index], delimiter, quote_char)
+            )
+        else:
+            header_names = list(head.get("inferred_columns") or [])
 
         if not header_names:
             header_names = [f"column_{i}" for i in range(modal_field_count)]
@@ -425,3 +440,22 @@ DOCUMENT:
             return next(csv.reader([line], delimiter=delimiter, quotechar=quote_char or '"'))
         except (csv.Error, StopIteration):
             return line.split(delimiter)
+
+    @staticmethod
+    def _unique_names(cells: List[str]) -> List[str]:
+        """Give every column a distinct, non-empty name from the raw header
+        cells. A blank cell becomes column_<index>; a repeat gains a numeric
+        suffix - callers key rows by name, so two columns sharing one would
+        otherwise collapse into a single key and lose the later column's data.
+        """
+        seen: Dict[str, int] = {}
+        named = []
+        for index, cell in enumerate(cells):
+            name = (cell or "").strip() or f"column_{index}"
+            if name in seen:
+                seen[name] += 1
+                name = f"{name}_{seen[name]}"
+            else:
+                seen[name] = 1
+            named.append(name)
+        return named

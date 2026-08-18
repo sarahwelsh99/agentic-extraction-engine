@@ -114,6 +114,27 @@ def test_large_document_stays_bounded_by_the_head_tail_window():
     print("✓ test_large_document_stays_bounded_by_the_head_tail_window PASSED")
 
 
+def test_a_short_header_line_survives_a_long_outlier_line():
+    """A real bug: a short header line and one enormous comment cell used to
+    be trimmed to the identical per-line byte cap, truncating the header
+    mid-word ("Language" -> "Lang") even though it was nowhere near using its
+    share of the budget. Trimming must protect short lines and absorb the
+    trim into the long outlier instead."""
+    tool = FetchAndSampleTool()
+    header = "Week,TL,Agent,Skill,Language,SPD,THT,TO%,NPS,CLS,TT"
+    huge_comment_row = "1,a,b,c,English," + ("x" * 5000) + ",1,2,3,4,5"
+    lines = [header, huge_comment_row] + [f"{i},a,b,c,English,1,2,3,4,5,6" for i in range(80)]
+    body_text = "\n".join(lines)
+
+    response = json.loads(tool({"body_text": body_text, "guid": "g"}))
+
+    assert response["status"] == "success"
+    sample_lines = response["raw_sample"].split("\n")
+    assert sample_lines[0] == header, "the short header must survive whole, untouched"
+
+    print("✓ test_a_short_header_line_survives_a_long_outlier_line PASSED")
+
+
 def test_edge_cases_do_not_crash():
     """Empty files, header-only files, and degenerate sample_size/skip_rows
     values are all handled without raising."""
@@ -184,6 +205,7 @@ def run_all_tests():
         test_micro_slicer_takes_head_and_tail_not_the_middle,
         test_small_document_is_returned_in_full,
         test_large_document_stays_bounded_by_the_head_tail_window,
+        test_a_short_header_line_survives_a_long_outlier_line,
         test_edge_cases_do_not_crash,
         test_special_characters_and_multiline_quoted_fields_are_preserved,
         test_format_detection_across_delimiters_and_json,
