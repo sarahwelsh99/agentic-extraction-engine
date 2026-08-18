@@ -202,6 +202,10 @@ class SandboxExecuteTool:
             # embedding a number, which is what lets one parser be cached and
             # reused across documents of different widths.
             "field_count": report.get("modal_field_count") or 0,
+            # From the Looker's structural_inspector: trailing rows (totals,
+            # page markers) that are not part of the table. 0 when there is
+            # no footer, so a report without one behaves exactly as before.
+            "skip_footer_lines": max(0, int(report.get("footer_start_from_bottom") or 0)),
         })
 
         try:

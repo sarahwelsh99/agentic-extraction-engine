@@ -26,9 +26,14 @@ class FetchAndSampleTool(AgentTool):
     SHEET_MARKER = SHEET_MARKER
     CELL_NEWLINE = CELL_NEWLINE
 
-    # Opening records always included in a sample, so a header sitting below a
-    # title block is still seen. Always returned, even if > sample_size.
-    HEAD_RECORDS = 5
+    # The Micro-Slicer's window: the Looker's LLM call needs the document's
+    # complete bounding box (where it starts and where it ends), not a spread
+    # sample from the middle, so this is a literal head+tail slice rather than
+    # sample_size-controlled. Bounded in bytes too, so an enormous document
+    # still produces a small, LLM-priced slice.
+    MICRO_SLICE_HEAD_LINES = 40
+    MICRO_SLICE_TAIL_LINES = 20
+    MICRO_SLICE_MAX_BYTES = 4096
 
     @property
     def name(self) -> str:
@@ -253,9 +258,12 @@ class FetchAndSampleTool(AgentTool):
                     body_text, max_bytes, encoding
                 )
 
-            # Sample across the whole document, not just the top of it
+            # Micro-Slicer: the document's complete bounding box (head+tail),
+            # not a spread across the middle - see _sample_records.
             sampled, sampled_indices = self._sample_records(records, sample_size, skip_rows)
-            sampled = self._fit_to_budget(sampled, max_bytes, encoding)
+            sampled = self._fit_to_budget(
+                sampled, min(max_bytes, self.MICRO_SLICE_MAX_BYTES), encoding
+            )
             raw_sample = "\n".join(sampled)
 
             if header_row_index is not None:
@@ -382,16 +390,18 @@ class FetchAndSampleTool(AgentTool):
         return split_records(body_text)
 
     def _sample_records(
-        self, records: List[str], sample_size: int, skip_rows: int = 0, head: int = None
+        self, records: List[str], sample_size: int, skip_rows: int = 0
     ) -> tuple[List[str], List[int]]:
-        """Sample records from across the whole document.
+        """Micro-Slicer: a literal head+tail window, the document's bounding box.
 
-        Takes an opening block plus records spaced evenly through the remainder,
-        so the sample reflects the document rather than only its opening rows.
-
-        The opening block is always returned in full, even if that exceeds
-        sample_size: these workbooks routinely carry a title block above the
-        header row, and a sample that misses the header is worth little.
+        Returns the opening MICRO_SLICE_HEAD_LINES records and the closing
+        MICRO_SLICE_TAIL_LINES records, rather than a sample spread across the
+        whole document. The Looker's structural-inspection call needs to see
+        both ends explicitly: a title block or comment rows above the header
+        at the top, and any footer (totals, page markers) at the bottom - a
+        spread sample can miss either. sample_size is accepted for the input
+        contract but no longer drives how much is taken; a document smaller
+        than the head+tail window is returned in full either way.
 
         Returns:
             Tuple of (sampled_records, their indices in the original document)
@@ -400,23 +410,14 @@ class FetchAndSampleTool(AgentTool):
         if not body:
             return [], []
 
-        if len(body) <= sample_size:
+        window = self.MICRO_SLICE_HEAD_LINES + self.MICRO_SLICE_TAIL_LINES
+        if len(body) <= window:
             return body, [i + skip_rows for i in range(len(body))]
 
-        head = min(self.HEAD_RECORDS if head is None else head, len(body))
-        indices = list(range(head))
+        head_n = min(self.MICRO_SLICE_HEAD_LINES, len(body))
+        tail_n = min(self.MICRO_SLICE_TAIL_LINES, len(body) - head_n)
 
-        # Span head..last inclusive, so the final record is always sampled: the
-        # tail of a sheet often holds totals or a section the body does not show.
-        spread = max(0, sample_size - head)
-        last = len(body) - 1
-        if spread == 1:
-            indices.append(last)
-        elif spread > 1:
-            step = (last - head) / (spread - 1)
-            indices += [head + round(i * step) for i in range(spread)]
-
-        indices = sorted({i for i in indices if i < len(body)})
+        indices = sorted(set(range(head_n)) | set(range(len(body) - tail_n, len(body))))
         return [body[i] for i in indices], [i + skip_rows for i in indices]
 
     def _fetch_from_bigquery(

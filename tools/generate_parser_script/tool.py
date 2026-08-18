@@ -259,6 +259,16 @@ class GenerateParserScriptTool:
         field_count = report.get("modal_field_count") or report.get("header_field_count")
         ragged = report.get("ragged")
 
+        # From the Looker's structural_inspector, when it found tokens this
+        # document uses to mean "no value" beyond a plain empty string (e.g.
+        # "N/A", "-"). Purely additive: a report with no null_values produces
+        # the same prompt as before.
+        null_values = report.get("null_values") or []
+        null_values_line = (
+            f"- null tokens (treat as None, same as an empty field): {null_values!r}\n"
+            if null_values else ""
+        )
+
         # On a retry, say what went wrong before the constraints, so the failure
         # is context for the whole task rather than an afterthought.
         retry_block = (
@@ -298,7 +308,7 @@ range {report.get('min_field_count')}-{report.get('max_field_count')}\
 {' (ragged: rows vary in width)' if ragged else ''}
 - rows in sheet: {report.get('sheet_record_count')}
 - sheet size in bytes: {report.get('sheet_byte_length')}
-
+{null_values_line}
 INPUT SAMPLE:
 {sample_str}
 {retry_block}
@@ -314,7 +324,10 @@ CONSTRAINTS:
    Never raise, and never set '_valid' False, because a row is a different
    length from the header.
 4. Strip surrounding whitespace. An empty field becomes None. Every other
-   value is kept as a string exactly as it appears.
+   value is kept as a string exactly as it appears. If null tokens are listed
+   above, a field matching one of them (after stripping) also becomes None -
+   this is recognizing the document's own null convention, not inferring a
+   type.
 5. Do NOT infer types and do NOT validate content. No field is a number, a
    date or a boolean here; there is no schema to enforce. Inventing rules
    rejects perfectly good values such as 'Yes' or a URL.

@@ -117,7 +117,7 @@ def run_pipeline(
             return tool1_output, None, None, None
 
         # Tool 2: Infer schema
-        tool2 = get_tool_by_name("delimiter_detector")
+        tool2 = get_tool_by_name("structural_inspector")
         t2_start = time.time()
         tool2_response = tool2(
             {

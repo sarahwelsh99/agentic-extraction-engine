@@ -20,11 +20,12 @@ BigQuery-side lock, so this assumes one machine drains one source at a time,
 exactly as mosaic assumes it. Two concurrent runs against the same source would
 duplicate work until the status marks caught up.
 
-A bin's documents run concurrently, then the whole bin is loaded in one
-BigQuery job and its statuses marked in one pair of statements. Loading comes
-before marking on purpose: crash in between and the guids stay pending, so they
-are reprocessed and the append-only table holds a second generation that the
-read-time dedup resolves. The other order would lose rows silently.
+A bin's documents run concurrently, then the whole bin is written to GCS
+(one Parquet file per document) and its statuses marked in one pair of
+statements. Writing comes before marking on purpose: crash in between and the
+guids stay pending, so they are reprocessed - each document's fixed,
+guid-partitioned path means a reprocessed document overwrites its own file
+rather than duplicating it (see write_parquet_to_gcs's docstring).
 
 Usage:
     python run_corpus.py --dry-run            # size the backlog, build nothing
@@ -168,10 +169,10 @@ def _run_bin(bin_id: int, rows: List[dict], workers: int) -> List[Dict]:
 
 def _commit_bin(client, status_table_id: str, bin_id: int,
                 results: List[Dict]) -> Tuple[int, int]:
-    """Load a bin's rows in one job, then mark its statuses.
+    """Write a bin's rows (one Parquet file per document), then mark its statuses.
 
     Returns:
-        (documents loaded, rows loaded)
+        (documents written, rows written)
     """
     from tools import get_tool_by_name
 
@@ -180,18 +181,18 @@ def _commit_bin(client, status_table_id: str, bin_id: int,
 
     rows_loaded = 0
     if passing:
-        loader = get_tool_by_name("load_to_bigquery")
-        response = json.loads(loader({
+        writer = get_tool_by_name("write_parquet_to_gcs")
+        response = json.loads(writer({
             "documents": [
                 {"guid": r["guid"], "extracted_rows": r["rows"]} for r in passing
             ]
         }))
         if response.get("status") != "success":
             # Leave every guid pending: the bin is retried whole on the next run.
-            raise RuntimeError(f"Bin {bin_id} load failed: {response.get('error')}")
-        rows_loaded = response.get("rows_loaded", 0)
-        logger.info(f"Bin {bin_id}: loaded {rows_loaded} row(s) from "
-                    f"{len(passing)} document(s) in 1 job")
+            raise RuntimeError(f"Bin {bin_id} write failed: {response.get('error')}")
+        rows_loaded = response.get("rows_written", 0)
+        logger.info(f"Bin {bin_id}: wrote {rows_loaded} row(s) from "
+                    f"{len(passing)} document(s), one Parquet file each")
 
     # Marks come after the load. Complete first, so a crash between the two
     # groups leaves failures pending rather than successes.

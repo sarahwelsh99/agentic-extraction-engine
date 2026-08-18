@@ -27,12 +27,10 @@ python run_corpus.py --requeue-errors                # retry parked failures fir
 (`fetch_pending_totals` → `fetch_pending_metadata` → bin-pack → drain each bin)
 — read it directly if you're touching that path.
 
-Before either of the above has anywhere to load into:
-
-```bash
-python scripts/provision_extraction_table.py            # show the plan
-python scripts/provision_extraction_table.py --create   # create the table once
-```
+Nothing needs provisioning first: `write_parquet_to_gcs` writes into
+`GCS_OUTPUT_BUCKET`/`GCS_OUTPUT_PREFIX` directly, with no schema to create
+ahead of time (see `docs/TOOLS.md`). The earlier BigQuery loader's
+provisioning step is retired along with it — `retired/provision_extraction_table.py`.
 
 ## Metrics
 

@@ -1,31 +1,36 @@
 """Agent Tools Package
 
-The extraction pipeline, in order:
+The extraction pipeline, in order - named here after the state machine's
+roles (see extraction/core/pipeline_agent.py):
 
-  1  fetch_and_sample        fetch the source and take a representative sample
-  2  delimiter_detector      report how the document is laid out
-  3  generate_parser_script  write a deterministic parser from that report
-  4  sandbox_execute         run the parser over the whole document
-  5  evaluate_extraction     decide whether the extraction worked
-  6  load_to_bigquery        load a passing extraction, one table per guid
+  1  fetch_and_sample        Looker (Micro-Slicer): fetch the source, slice a
+                              bounded head+tail window
+  2  structural_inspector    Looker (Structural Inspector): LLM-based
+                              structural spec - header/footer bounds,
+                              delimiter, null values
+  3  generate_parser_script  Thinker: write a deterministic parser from that spec
+  4  sandbox_execute         Tester: run the parser over the whole document
+  5  evaluate_extraction     Eval: decide whether the extraction worked
+  6  write_parquet_to_gcs    Deliver: write a passing extraction, one Parquet
+                              file per guid
 
 Each tool is self-contained in its own directory with tool.py and test_tool.py.
 """
 
 from tools.fetch_and_sample.tool import FetchAndSampleTool
-from tools.delimiter_detector.tool import DelimiterDetectorTool
+from tools.structural_inspector.tool import StructuralInspectorTool
 from tools.generate_parser_script.tool import GenerateParserScriptTool
 from tools.sandbox_execute.tool import SandboxExecuteTool
 from tools.evaluate_extraction.tool import EvaluateExtractionTool
-from tools.load_to_bigquery.tool import LoadToBigQueryTool
+from tools.write_parquet_to_gcs.tool import WriteParquetToGcsTool
 
 __all__ = [
     "FetchAndSampleTool",
-    "DelimiterDetectorTool",
+    "StructuralInspectorTool",
     "GenerateParserScriptTool",
     "SandboxExecuteTool",
     "EvaluateExtractionTool",
-    "LoadToBigQueryTool",
+    "WriteParquetToGcsTool",
     "get_all_tools",
     "get_tool_by_name",
 ]
@@ -33,20 +38,20 @@ __all__ = [
 # Pipeline order, for callers that want to walk the stages
 PIPELINE = [
     "fetch_and_sample",
-    "delimiter_detector",
+    "structural_inspector",
     "generate_parser_script",
     "sandbox_execute",
     "evaluate_extraction",
-    "load_to_bigquery",
+    "write_parquet_to_gcs",
 ]
 
 _TOOLS = {
     "fetch_and_sample": FetchAndSampleTool,
-    "delimiter_detector": DelimiterDetectorTool,
+    "structural_inspector": StructuralInspectorTool,
     "generate_parser_script": GenerateParserScriptTool,
     "sandbox_execute": SandboxExecuteTool,
     "evaluate_extraction": EvaluateExtractionTool,
-    "load_to_bigquery": LoadToBigQueryTool,
+    "write_parquet_to_gcs": WriteParquetToGcsTool,
 }
 
 
@@ -68,7 +73,7 @@ def get_tool_by_name(name: str):
     """Get a tool by name using lazy instantiation.
 
     Args:
-        name: Tool name, e.g. "delimiter_detector"
+        name: Tool name, e.g. "structural_inspector"
 
     Returns:
         Tool instance, or None if unknown or not constructible here

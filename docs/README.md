@@ -7,20 +7,23 @@ fresh attempt from nothing.
 
 ## Architecture overview
 
-Six tools, chained per document by `run_pipeline.py`:
+An explicit state machine, driven by `extraction/core/pipeline_agent.py` and
+run per document by `run_pipeline.py`: Looker runs once, then
+Thinker → Tester → Eval loop with feedback until Eval passes or the retry
+ceiling (`config.MAX_EXTRACTION_ATTEMPTS`) is reached.
 
 ```
-1  fetch_and_sample        fetch the source and take a representative sample
-2  delimiter_detector      report how the document is laid out
-3  generate_parser_script  write a deterministic parser from that report
-4  sandbox_execute         run the parser over the whole document
-5  evaluate_extraction     decide whether the extraction worked
-6  load_to_bigquery        load a passing extraction, one table per guid
+Looker    fetch_and_sample (Micro-Slicer: bounded head+tail slice)
+          + structural_inspector (LLM: header/footer bounds, delimiter,
+            null values) — once per document
+Thinker   generate_parser_script    write a deterministic parser from that spec
+Tester    sandbox_execute           run the parser over the whole document
+Eval      evaluate_extraction       decide whether the extraction worked
+Deliver   write_parquet_to_gcs      one Parquet file per guid, after Eval passes
 ```
 
-A failure at step 5 retries from step 3 (bounded by
-`MAX_EXTRACTION_ATTEMPTS`), passing the failure back to the model instead of
-re-deriving the document's structure from scratch each time.
+A failure at Eval retries from Thinker, passing the failure back to the model
+instead of re-deriving the document's structure from scratch each time.
 
 `population_selection/` runs independently, before any of the above: a
 regex pass over `glean.drive_files` that decides which documents contain PII
@@ -41,7 +44,10 @@ terminology.
 ### Cache generated code, don't regenerate it
 - Tool 3's output is cached by a hash of the document's *structure*
   (delimiter, header shape, field count — not row counts or column names),
-  so every document sharing a shape reuses one generated parser.
+  so every document sharing a shape reuses one generated parser. The Looker's
+  structural spec is not cached the same way — it's read per document (footer
+  location, null tokens) rather than a reusable shape, so it costs one LLM
+  call every time, unlike a Tool 3 cache hit.
 
 ### Reuses mosaic's battle-tested patterns
 - Work queue (`extraction/core/workqueue.py`): SQLite bins, LPT packing,
@@ -79,10 +85,10 @@ terminology.
    source source.env
    ```
 
-5. **Provision the output table** (once)
-   ```bash
-   python scripts/provision_extraction_table.py --create
-   ```
+5. **GCS output bucket**: `GCS_OUTPUT_BUCKET`/`GCS_OUTPUT_PREFIX` (see
+   Configuration below) must point at a bucket the pipeline can write to.
+   Nothing needs provisioning first — `write_parquet_to_gcs` writes directly,
+   with no schema to create ahead of time.
 
 ### Run
 

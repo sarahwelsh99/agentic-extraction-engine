@@ -19,6 +19,8 @@ import json
 import logging
 from typing import Any, Dict, List, Optional
 
+from extraction.core import config
+
 logger = logging.getLogger(__name__)
 
 
@@ -41,7 +43,9 @@ class EvaluateExtractionTool:
     MIN_COLUMN_DELIVERY = 0.90
 
     # Attempts in total, including the first, before a failure is given up on.
-    MAX_ATTEMPTS = 2
+    # Shared with extraction/core/pipeline_agent.py via config, rather than
+    # each keeping an independent copy that has to be hand-synced.
+    MAX_ATTEMPTS = config.MAX_EXTRACTION_ATTEMPTS
 
     def __call__(self, inputs: Dict[str, Any]) -> str:
         """Evaluate one execution.

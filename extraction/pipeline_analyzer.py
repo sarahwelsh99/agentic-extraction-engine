@@ -51,7 +51,7 @@ class ToolValidator:
         return issues
 
     def validate_tool2(self, guid: str, output: Dict[str, Any]) -> List[str]:
-        """Validate Tool 2 (delimiter_detector) output.
+        """Validate Tool 2 (structural_inspector) output.
 
         Checks:
         - Status is success
