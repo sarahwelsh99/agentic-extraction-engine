@@ -47,13 +47,21 @@ def _generate(report=None, sample=SAMPLE, **extra):
 
 
 def test_generates_a_working_parser():
-    """The generated class parses a row into the document's own columns."""
+    """The generated class parses a row into the document's own columns,
+    pads a short row rather than raising, and echoes the structure it was
+    built for."""
     get_cache().clear()
     response = _generate()
 
     assert response["status"] == "success", response
     code = response["generated_code"]["code"]
     assert response["generated_code"]["syntax_valid"]
+
+    spec = response["generated_code"]["format_spec"]
+    assert spec["delimiter"] == ","
+    assert spec["source_format"] == "csv"
+    assert spec["field_count"] == 4
+    assert spec["header_row"] == 0
 
     # FIELD_COUNT is supplied by the sandbox at run time, not written into the
     # code: that is what lets one cached parser serve documents of any width.
@@ -71,36 +79,27 @@ def test_generates_a_working_parser():
     assert values[3] == "john@company.com", values
     assert parsed.get("_valid") is True, parsed
 
+    # Rows carrying fewer fields than the header are normal, not fatal.
+    short = extractor.parse_row(["10002"])
+    assert len(short["values"]) == 4, short
+    assert short["values"][0] == "10002"
+    assert short["values"][3] is None
+
     print("✓ test_generates_a_working_parser PASSED")
 
 
-def test_short_row_does_not_raise():
-    """Rows carrying fewer fields than the header are normal, not fatal."""
-    response = _generate()
-    namespace = {"FIELD_COUNT": 4}
-    exec(response["generated_code"]["code"], namespace)
+def test_error_paths_before_generation():
+    """A document rejected upstream never reaches the model; a missing report
+    is refused outright - neither needs a live generation."""
+    rejected = _generate(rejected=True, rejection_reason="No header row detected")
+    assert rejected["status"] == "skipped"
+    assert "header" in rejected["error"].lower()
 
-    result = namespace["DataExtractor"].parse_row(["10002"])
-    assert isinstance(result, dict), "a short row must return a dict, not raise"
-    # Short rows are padded to the declared width, not treated as broken
-    assert len(result["values"]) == 4, result
-    assert result["values"][0] == "10002"
-    assert result["values"][3] is None
+    missing_report = _generate(report={})
+    assert missing_report["status"] == "error"
+    assert "metadata_report" in missing_report["error"]
 
-    print("✓ test_short_row_does_not_raise PASSED")
-
-
-def test_format_spec_echoes_the_report():
-    """The response reports the structure the parser was built for."""
-    response = _generate()
-    spec = response["generated_code"]["format_spec"]
-
-    assert spec["delimiter"] == ","
-    assert spec["source_format"] == "csv"
-    assert spec["field_count"] == 4
-    assert spec["header_row"] == 0
-
-    print("✓ test_format_spec_echoes_the_report PASSED")
+    print("✓ test_error_paths_before_generation PASSED")
 
 
 def test_cache_key_ignores_row_counts():
@@ -124,33 +123,9 @@ def test_cache_key_ignores_row_counts():
     print("✓ test_cache_key_ignores_row_counts PASSED")
 
 
-def test_rejected_document_is_skipped():
-    """A document rejected upstream never reaches the model."""
-    response = _generate(rejected=True, rejection_reason="No header row detected")
-
-    assert response["status"] == "skipped"
-    assert "header" in response["error"].lower()
-
-    print("✓ test_rejected_document_is_skipped PASSED")
-
-
-def test_missing_report_is_an_error():
-    """Without a metadata report there is nothing to build a parser from."""
-    response = _generate(report={})
-
-    assert response["status"] == "error"
-    assert "metadata_report" in response["error"]
-
-    print("✓ test_missing_report_is_an_error PASSED")
-
-
-def test_truncated_code_is_rejected():
-    """Code whose parse_row never returns is refused, so it cannot be cached.
-
-    Output that overruns max_tokens gets stripped by the repair loop until it
-    compiles, which routinely removes the trailing return. Cached, that failure
-    would be served for every document of this shape.
-    """
+def test_bad_generated_code_is_rejected():
+    """Code that never returns, and code with a hard-coded width, are both
+    refused before they can be cached."""
     tool = GenerateParserScriptTool()
 
     truncated = (
@@ -161,22 +136,9 @@ def test_truncated_code_is_rejected():
         "        values = [None] * FIELD_COUNT\n"
     )
     assert tool._validate_extractor(truncated) is not None
-
     complete = truncated + "        return {'values': values}\n"
     assert tool._validate_extractor(complete) is None
-
     assert "DataExtractor" in tool._validate_extractor("x = 1")
-
-    print("✓ test_truncated_code_is_rejected PASSED")
-
-
-def test_hard_coded_width_is_rejected():
-    """A literal width would be wrong for every other document sharing the parser.
-
-    One cache entry now serves documents of any width, so the code must read
-    FIELD_COUNT rather than embed a number.
-    """
-    tool = GenerateParserScriptTool()
 
     hard_coded = (
         "from typing import Dict, Any, List\n"
@@ -189,7 +151,7 @@ def test_hard_coded_width_is_rejected():
     defect = tool._validate_extractor(hard_coded)
     assert defect is not None and "FIELD_COUNT" in defect, defect
 
-    print("\u2713 test_hard_coded_width_is_rejected PASSED")
+    print("✓ test_bad_generated_code_is_rejected PASSED")
 
 
 def test_stub_before_the_real_class_is_skipped():
@@ -233,11 +195,13 @@ def test_stub_before_the_real_class_is_skipped():
     exec(code, namespace)
     assert namespace["DataExtractor"].parse_row(["a"])["values"] == ["a", None, None]
 
-    print("\u2713 test_stub_before_the_real_class_is_skipped PASSED")
+    print("✓ test_stub_before_the_real_class_is_skipped PASSED")
 
 
-def test_prompt_is_bounded_by_the_header():
-    """A very wide document must not produce an unbounded prompt."""
+def test_prompt_is_bounded_and_carries_null_values():
+    """A very wide document must not produce an unbounded prompt, and
+    null_values from the Looker (when present) show up as extra prompt
+    context without changing the prompt for a report that lacks them."""
     tool = GenerateParserScriptTool()
     wide = {
         **REPORT,
@@ -252,7 +216,11 @@ def test_prompt_is_bounded_by_the_header():
     assert len(prompt) < 20000, len(prompt)
     assert abs(len(prompt) - len(narrow)) < 200, (len(prompt), len(narrow))
 
-    print("✓ test_prompt_is_bounded_by_the_header PASSED")
+    with_nulls = tool._build_prompt({**REPORT, "null_values": ["N/A", "-"]}, SAMPLE)
+    assert "N/A" in with_nulls and "-" in with_nulls
+    assert len(with_nulls) > len(narrow)
+
+    print("✓ test_prompt_is_bounded_and_carries_null_values PASSED")
 
 
 class FakeSession:
@@ -271,9 +239,19 @@ class FakeSession:
         return reply
 
 
-def test_no_session_builds_the_full_document_prompt():
-    """Without a session, every attempt gets the same from-scratch prompt."""
+def test_session_behavior():
+    """Three branches of _generate_code's session handling, plus the retry
+    a bad extraction triggers within one session:
+
+    - no session: every attempt gets the same from-scratch prompt.
+    - an empty session (first attempt was served from cache and never
+      actually generated anything): still needs the whole document prompt.
+    - a session already holding this tool's own prior turn: a retry is a
+      short "fix this", not a rebuilt document-structure prompt.
+    - a reply with no extractable code is re-asked in the same conversation.
+    """
     tool = GenerateParserScriptTool()
+
     seen = {}
 
     def fake_call_vllm(prompt, max_tokens=2000):
@@ -282,89 +260,49 @@ def test_no_session_builds_the_full_document_prompt():
 
     tool._call_vllm = fake_call_vllm
     code = tool._generate_code(REPORT, SAMPLE, None, session=None, max_tokens=2000)
-
     assert code == "CODE"
     assert seen["prompt"] == tool._build_prompt(REPORT, SAMPLE, None)
 
-    print("✓ test_no_session_builds_the_full_document_prompt PASSED")
-
-
-def test_empty_session_gets_the_full_document_prompt():
-    """A session's first real generation still needs the whole document.
-
-    Guards against the case where the session's first attempt was served
-    from cache and never actually generated anything: the next attempt must
-    not send a bare "fix this" with no code or document in view.
-    """
-    tool = GenerateParserScriptTool()
-    session = FakeSession(replies=["CODE"])
-
-    code = tool._generate_code(REPORT, SAMPLE, None, session=session, max_tokens=2000)
-
+    empty_session = FakeSession(replies=["CODE"])
+    code = tool._generate_code(REPORT, SAMPLE, None, session=empty_session, max_tokens=2000)
     assert code == "CODE"
-    assert session.sent == [tool._build_prompt(REPORT, SAMPLE, None)]
+    assert empty_session.sent == [tool._build_prompt(REPORT, SAMPLE, None)]
 
-    print("✓ test_empty_session_gets_the_full_document_prompt PASSED")
-
-
-def test_session_with_history_gets_a_short_retry_prompt():
-    """Once the session holds this tool's own prior turn, a retry is 'fix this'.
-
-    The retry must reference the failure but must not rebuild the document
-    structure prompt: that context already lives in the conversation.
-    """
-    tool = GenerateParserScriptTool()
-    session = FakeSession(
+    session_with_history = FakeSession(
         replies=["CODE-v2"],
         messages=[
             {"role": "user", "content": "<earlier full prompt>"},
             {"role": "assistant", "content": "CODE-v1"},
         ],
     )
-
     code = tool._generate_code(
-        REPORT, SAMPLE, "parse_row raised IndexError", session=session, max_tokens=2000
+        REPORT, SAMPLE, "parse_row raised IndexError",
+        session=session_with_history, max_tokens=2000,
     )
-
     assert code == "CODE-v2"
-    assert len(session.sent) == 1
-    retry_prompt = session.sent[0]
+    assert len(session_with_history.sent) == 1
+    retry_prompt = session_with_history.sent[0]
     assert "IndexError" in retry_prompt, retry_prompt
     assert REPORT["delimiter_name"] not in retry_prompt, "must not rebuild the document prompt"
     assert "Fix the DataExtractor class" in retry_prompt
 
-    print("✓ test_session_with_history_gets_a_short_retry_prompt PASSED")
-
-
-def test_call_session_retries_on_empty_extraction():
-    """A reply with no extractable code is re-asked in the same conversation."""
-    tool = GenerateParserScriptTool()
-    session = FakeSession(replies=["not code at all", "CODE"])
-
-    code = tool._call_session(session, "generate code", max_tokens=2000)
-
+    retrying_session = FakeSession(replies=["not code at all", "CODE"])
+    code = tool._call_session(retrying_session, "generate code", max_tokens=2000)
     assert code == "CODE"
-    assert len(session.sent) == 2, "a bad generation must trigger a retry"
+    assert len(retrying_session.sent) == 2, "a bad generation must trigger a retry"
 
-    print("✓ test_call_session_retries_on_empty_extraction PASSED")
+    print("✓ test_session_behavior PASSED")
 
 
 def run_all_tests():
     tests = [
         test_generates_a_working_parser,
-        test_short_row_does_not_raise,
-        test_format_spec_echoes_the_report,
+        test_error_paths_before_generation,
         test_cache_key_ignores_row_counts,
-        test_rejected_document_is_skipped,
-        test_missing_report_is_an_error,
-        test_truncated_code_is_rejected,
-        test_hard_coded_width_is_rejected,
+        test_bad_generated_code_is_rejected,
         test_stub_before_the_real_class_is_skipped,
-        test_prompt_is_bounded_by_the_header,
-        test_no_session_builds_the_full_document_prompt,
-        test_empty_session_gets_the_full_document_prompt,
-        test_session_with_history_gets_a_short_retry_prompt,
-        test_call_session_retries_on_empty_extraction,
+        test_prompt_is_bounded_and_carries_null_values,
+        test_session_behavior,
     ]
     passed = failed = 0
     for test in tests:

@@ -7,22 +7,22 @@ design rationale lives there, not here.
 ## Layout
 
 ```
-tools/                      Tools 1-6 (see docs/TOOLS.md)
+tools/                      Looker/Thinker/Tester/Eval/Deliver (see docs/TOOLS.md)
   base.py                   AgentTool base class + ToolResponse
   __init__.py                 registry: get_all_tools(), get_tool_by_name(), PIPELINE order
-  fetch_and_sample/
-  delimiter_detector/
-  generate_parser_script/
-  sandbox_execute/
-  evaluate_extraction/
-  load_to_bigquery/
-  write_parquet_to_gcs/     an alternative Tool 6 — not wired into the registry or run_pipeline.py
+  fetch_and_sample/          Looker: Micro-Slicer (code) - bounded head+tail slice
+  structural_inspector/     Looker: Structural Inspector (LLM) - header/footer/delimiter/nulls
+  generate_parser_script/   Thinker
+  sandbox_execute/          Tester
+  evaluate_extraction/      Eval
+  write_parquet_to_gcs/     Deliver - one Parquet file per guid
 
 extraction/
   core/
     config.py                env-driven configuration
-    bigquery_service.py      status-table reads/writes (population, queue, load)
+    bigquery_service.py      status-table reads/writes (population, queue)
     llm_service.py           LocalLLMClient + LLMSession (vLLM client)
+    pipeline_agent.py        the state machine: PipelineState + PipelineAgent
     workqueue.py             SQLite work queue, LPT bin-packing (from mosaic)
     records.py               shared record/row dataclasses
   metrics_recorder.py         per-run metrics -> metrics.csv / metrics.json
@@ -30,11 +30,13 @@ extraction/
   pipeline_analyzer.py         validates Tools 1-4 output for the test harness
 
 population_selection/        standalone regex PII pre-filter, run before extraction
-run_pipeline.py               run Tools 1-6 on one document
+run_pipeline.py               drive PipelineAgent for one document, then deliver
 run_corpus.py                 drain the whole pending backlog through run_pipeline.py's logic
-scripts/provision_extraction_table.py
 
 retired/                     superseded tools, kept for reference (see retired/README.md)
+                              - includes delimiter_detector (Looker's earlier
+                                heuristic form) and load_to_bigquery (the
+                                earlier delivery step)
 cache/                       schema_code_cache.db, column_labels.db (gitignored data, not code)
 ```
 
@@ -51,22 +53,31 @@ historical, not as a second live pipeline.
 ## The live pipeline
 
 `tools/__init__.py`'s docstring is the shortest accurate description of the
-pipeline order:
+pipeline order, named after the state machine's roles:
 
 ```
-1  fetch_and_sample        fetch the source and take a representative sample
-2  delimiter_detector      report how the document is laid out
-3  generate_parser_script  write a deterministic parser from that report
-4  sandbox_execute         run the parser over the whole document
-5  evaluate_extraction     decide whether the extraction worked
-6  load_to_bigquery        load a passing extraction, one table per guid
+1  fetch_and_sample        Looker (Micro-Slicer): bounded head+tail slice
+2  structural_inspector    Looker (Structural Inspector): LLM structural spec
+3  generate_parser_script  Thinker: write a deterministic parser from that spec
+4  sandbox_execute         Tester: run the parser over the whole document
+5  evaluate_extraction     Eval: decide whether the extraction worked
+6  write_parquet_to_gcs    Deliver: write a passing extraction, one file per guid
 ```
 
-`run_pipeline.run_pipeline(guid)` chains all six for one document, including
-the generate → sandbox → evaluate retry loop (`MAX_EXTRACTION_ATTEMPTS`,
-currently 2) with an `LLMSession` shared across retries so a retry is a short
-follow-up turn against the code and failure already generated, not a rebuilt
-prompt (see `extraction/core/llm_service.py`).
+`extraction/core/pipeline_agent.py`'s `PipelineAgent` is the state machine
+itself: Looker runs once (`_look()`), then Thinker → Tester → Eval loop
+(`_think()` → `_test()` → `_eval()`) with feedback until Eval passes or the
+retry ceiling (`config.MAX_EXTRACTION_ATTEMPTS`, currently 2 - the single
+source of truth also read by `tools/evaluate_extraction/tool.py`) is reached,
+with an `LLMSession` shared across retries so a retry is a short follow-up
+turn against the code and failure already generated, not a rebuilt prompt
+(see `extraction/core/llm_service.py`). All of this state lives in one typed
+`PipelineState` (`looker_spec`, `metadata_report`, `error_logs`,
+`retry_count`, `extracted_rows`, ...) rather than loose local variables.
+
+`run_pipeline.run_pipeline(guid)` builds a `PipelineAgent`, runs it, and
+delivers a passing result with Tool 6 — it owns logging, metrics recording,
+and the CLI, not the state machine's control flow.
 
 `run_corpus.py` drains the backlog: it reads the status table population
 selection populated (never `glean.drive_files` directly), bin-packs pending
@@ -81,9 +92,9 @@ everything else in this list — see `docs/CLAUDE.md` for what it does and why.
 
 ## Tool interface
 
-Only `fetch_and_sample` and `delimiter_detector` inherit `AgentTool` /
-`ToolResponse` from `tools/base.py`. The rest (`generate_parser_script`,
-`sandbox_execute`, `evaluate_extraction`, `load_to_bigquery`) are plain
+Only `fetch_and_sample` inherits `AgentTool` / `ToolResponse` from
+`tools/base.py`. The rest (`structural_inspector`, `generate_parser_script`,
+`sandbox_execute`, `evaluate_extraction`, `write_parquet_to_gcs`) are plain
 classes whose `__call__` returns a JSON string directly — both shapes are
 called the same way by the registry:
 
@@ -100,8 +111,10 @@ without a fully configured environment.
 
 ## Testing
 
-Each tool's tests live next to it (`tools/<name>/test_tool.py`) and are
-pytest-discoverable. `test_tools_1_to_4.py` at the repo root is a separate,
-heavier harness that runs Tools 1-4 against real documents fetched from
-`glean` and validates output with `extraction/pipeline_analyzer.py` — see
-`docs/PIPELINE_OPERATIONS.md`.
+Each tool's tests live next to it (`tools/<name>/test_tool.py`), and the
+state machine's own tests live at `extraction/core/test_pipeline_agent.py`
+(every tool faked, pinning the retry/rejection transitions rather than vLLM
+or Docker behaviour) — both are pytest-discoverable. `test_tools_1_to_4.py`
+at the repo root is a separate, heavier harness that runs Tools 1-4 against
+real documents fetched from `glean` and validates output with
+`extraction/pipeline_analyzer.py` — see `docs/PIPELINE_OPERATIONS.md`.

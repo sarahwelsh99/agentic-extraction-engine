@@ -1,0 +1,262 @@
+"""The pipeline as an explicit state machine: Looker -> Thinker -> Tester -> Eval.
+
+Looker runs once (fetch_and_sample's Micro-Slicer, then structural_inspector),
+then Thinker -> Tester -> Eval loop with feedback until Eval passes or the
+retry ceiling (config.MAX_EXTRACTION_ATTEMPTS) is reached:
+
+    [Looker]  fetch_and_sample + structural_inspector, once
+        |
+    [Thinker] generate_parser_script  <---------------.
+        |                                              |
+    [Tester]  sandbox_execute                           | retry, with the
+        |                                              | failure as feedback
+    [Eval]    evaluate_extraction  --- failed, retry --'
+        |
+     passed
+        |
+    caller delivers (write_parquet_to_gcs)
+
+This replaces the loose local variables (feedback, attempt, llm_session) that
+used to be threaded through run_pipeline.py's while loop with one typed
+PipelineState, and collapses the retry ceiling that used to be duplicated
+between run_pipeline.py and evaluate_extraction/tool.py into the single
+config.MAX_EXTRACTION_ATTEMPTS both now read.
+
+Delivery (Tool 6) is deliberately not a state here - a passing PipelineState
+is handed to the caller (run_pipeline.py), which loads it in a batch alongside
+other documents rather than one at a time (see write_parquet_to_gcs and
+run_corpus.py's per-bin batching).
+"""
+
+import time
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional
+
+from extraction.core import config
+from extraction.core.llm_service import get_llm_client, LLMSession
+from tools import get_tool_by_name
+import json
+
+
+def _require_tool(name: str):
+    """Fetch a tool, failing with the reason rather than a NoneType error."""
+    tool = get_tool_by_name(name)
+    if tool is None:
+        raise RuntimeError(
+            f"Tool '{name}' could not be created. Check its configuration "
+            f"(see the error logged above)."
+        )
+    return tool
+
+
+@dataclass
+class PipelineState:
+    """State carried through one document's run of the agent loop."""
+
+    guid: str
+    status: str = "running"  # running | success | failed | rejected
+    looker_spec: Optional[Dict[str, Any]] = None
+    metadata_report: Dict[str, Any] = field(default_factory=dict)
+    generated_code: Optional[Dict[str, Any]] = None
+    error_logs: List[str] = field(default_factory=list)
+    retry_count: int = 0
+    extracted_rows: List[Dict[str, Any]] = field(default_factory=list)
+    rejection_code: Optional[str] = None
+    rejection_reason: Optional[str] = None
+    failure_reason: Optional[str] = None
+    should_retry: bool = False
+    # One entry per tool call, in order: {"stage", "attempt", "start", "end",
+    # "status", "response"} - the raw tool response, so the caller
+    # (run_pipeline.py) can pull whatever fields its own metrics CSV wants
+    # without this module needing to know their names.
+    stage_log: List[Dict[str, Any]] = field(default_factory=list)
+
+
+class PipelineAgent:
+    """Drives one document through Looker -> Thinker -> Tester -> Eval."""
+
+    def __init__(
+        self,
+        guid: str,
+        body_text: Optional[str] = None,
+        tools: Optional[Dict[str, Any]] = None,
+        llm_session: Optional[LLMSession] = None,
+    ):
+        """
+        Args:
+            tools: optional override of {tool_name: callable}, for tests -
+                each callable takes an input dict and returns a JSON string,
+                same convention as every tool's __call__. Any name not given
+                falls back to the real, registered tool.
+            llm_session: optional override, so tests need not reach vLLM.
+        """
+        self.guid = guid
+        self.body_text = body_text
+        self.state = PipelineState(guid=guid)
+
+        tools = tools or {}
+        self._tool1 = tools.get("fetch_and_sample") or _require_tool("fetch_and_sample")
+        self._tool2 = tools.get("structural_inspector") or _require_tool("structural_inspector")
+        self._tool3 = tools.get("generate_parser_script") or _require_tool("generate_parser_script")
+        self._tool4 = tools.get("sandbox_execute") or _require_tool("sandbox_execute")
+        self._tool5 = tools.get("evaluate_extraction") or _require_tool("evaluate_extraction")
+
+        # One conversation for this document's whole generate-validate-retry
+        # loop: a retry is "fix this" against the code and failure Tool 3
+        # already saw, not a rebuilt prompt. Scoped to this guid; dropped
+        # when the loop ends.
+        self._llm_session = llm_session if llm_session is not None else LLMSession(get_llm_client())
+        self._tool1_response: Dict[str, Any] = {}
+
+    def run(self) -> PipelineState:
+        """Run the whole loop for this document. Always returns the final state."""
+        if not self._look():
+            return self.state
+
+        while self.state.retry_count < config.MAX_EXTRACTION_ATTEMPTS:
+            self.state.retry_count += 1
+
+            if not self._think():
+                if self.state.status != "running":
+                    return self.state
+                continue  # generation failed this attempt; retry with feedback
+
+            test_response = self._test()
+            if test_response is None:
+                return self.state  # the tool call itself broke, not the script
+
+            if self._eval(test_response):
+                self.state.status = "success"
+                return self.state
+            if self.state.status != "running" or not self.state.should_retry:
+                break
+
+        self.state.status = "failed"
+        return self.state
+
+    def _log(self, stage: str, start: float, status: str, response: Dict[str, Any]) -> None:
+        self.state.stage_log.append({
+            "stage": stage,
+            "attempt": self.state.retry_count,
+            "start": start,
+            "end": time.time(),
+            "status": status,
+            "response": response,
+        })
+
+    # ---------- Looker: fetch_and_sample (Micro-Slicer) + structural_inspector ----------
+    def _look(self) -> bool:
+        start = time.time()
+        response = json.loads(self._tool1({
+            "guid": self.guid,
+            "body_text": self.body_text,
+            "sample_size": 5,
+        }))
+        self._log("look_slice", start, response.get("status", "error"), response)
+        if response.get("status") != "success":
+            self.state.status = "failed"
+            self.state.failure_reason = f"fetch_and_sample failed: {response.get('error')}"
+            return False
+        self._tool1_response = response
+
+        start = time.time()
+        inspected = json.loads(self._tool2({
+            "guid": self.guid,
+            "raw_sample": response["raw_sample"],
+            "sampled_record_indices": response.get("sampled_record_indices"),
+            "sheet_names": response.get("sheet_names"),
+            "total_records": response.get("total_records"),
+            "total_bytes": response.get("total_bytes"),
+            "encoding": response.get("encoding"),
+        }))
+        self._log("look_inspect", start, inspected.get("status", "error"), inspected)
+        if inspected.get("status") != "success":
+            self.state.status = "failed"
+            self.state.failure_reason = f"structural_inspector failed: {inspected.get('error')}"
+            return False
+
+        if inspected.get("rejected"):
+            self.state.status = "rejected"
+            self.state.rejection_code = inspected.get("rejection_code")
+            self.state.rejection_reason = inspected.get("rejection_reason")
+            return False
+
+        self.state.looker_spec = inspected.get("looker_spec")
+        self.state.metadata_report = inspected.get("metadata_report", {})
+        return True
+
+    # ---------- Thinker: generate_parser_script ----------
+    def _think(self) -> bool:
+        start = time.time()
+        feedback = self.state.error_logs[-1] if self.state.error_logs else None
+        response = json.loads(self._tool3({
+            "guid": self.guid,
+            "raw_sample": self._tool1_response.get("raw_sample"),
+            "metadata_report": self.state.metadata_report,
+            "feedback": feedback,
+            "attempt": self.state.retry_count,
+            "session": self._llm_session,
+        }))
+        self._log("think", start, response.get("status", "error"), response)
+
+        if response.get("status") == "skipped":
+            self.state.status = "rejected"
+            self.state.rejection_reason = response.get("error")
+            return False
+
+        if response.get("status") != "success":
+            # Generation is not deterministic, so it can fail on a document it
+            # would succeed on next time - worth a retry, not an abandon.
+            self.state.error_logs.append(
+                f"The previous attempt did not produce usable code: "
+                f"{response.get('error')}. Write straightforward code and "
+                f"make sure parse_row returns its result."
+            )
+            if self.state.retry_count >= config.MAX_EXTRACTION_ATTEMPTS:
+                self.state.status = "failed"
+                self.state.failure_reason = f"Could not generate a script: {response.get('error')}"
+            return False
+
+        self.state.generated_code = response.get("generated_code", {})
+        return True
+
+    # ---------- Tester: sandbox_execute ----------
+    def _test(self) -> Optional[Dict[str, Any]]:
+        start = time.time()
+        response = json.loads(self._tool4({
+            "guid": self.guid,
+            "generated_code": self.state.generated_code.get("code"),
+            # The full document, not Tool 1's slice: the slice bounds the
+            # Looker's LLM call, not what gets extracted.
+            "body_text": self.body_text or self._tool1_response.get("raw_sample"),
+            "metadata_report": self.state.metadata_report,
+        }))
+        self._log("test", start, response.get("status", "error"), response)
+        return response
+
+    # ---------- Eval: evaluate_extraction ----------
+    def _eval(self, test_response: Dict[str, Any]) -> bool:
+        start = time.time()
+        response = json.loads(self._tool5({
+            "guid": self.guid,
+            "execution_result": test_response,
+            "metadata_report": self.state.metadata_report,
+            "attempt": self.state.retry_count,
+        }))
+        self._log("eval", start, response.get("status", "error"), response)
+
+        if response.get("status") != "success":
+            self.state.status = "failed"
+            self.state.failure_reason = f"evaluate_extraction failed: {response.get('error')}"
+            return False
+
+        passed = bool(response.get("extraction_passed"))
+        self.state.failure_reason = response.get("failure_reason")
+        self.state.should_retry = bool(response.get("should_retry"))
+
+        if passed:
+            self.state.extracted_rows = test_response.get("extracted_rows", [])
+            return True
+
+        self.state.error_logs.append(self.state.failure_reason or "extraction failed")
+        return False

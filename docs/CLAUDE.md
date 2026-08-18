@@ -6,17 +6,20 @@ This page is terminology, gotchas, and things that are easy to get wrong.
 
 ## Key Concepts
 
-### Six tools, not four phases
+### A state machine, not four phases
 
 An earlier design (`orchestrator.py`, `extraction/phase1/`…`phase4/`) split
 the work into four phases: LLM code generation once, then deterministic
 execution at scale. That design is not live — see "Legacy, not part of the
 live pipeline" in [ARCHITECTURE.md](ARCHITECTURE.md). The pipeline that
-actually runs is `run_pipeline.py` chaining Tools 1-6
-(`fetch_and_sample → delimiter_detector → generate_parser_script →
-sandbox_execute → evaluate_extraction → load_to_bigquery`) per document,
-with a generate → sandbox → evaluate retry loop bounded by
-`MAX_EXTRACTION_ATTEMPTS`. Don't reach for `orchestrator.py` or `phase1-4` —
+actually runs is `extraction/core/pipeline_agent.py`'s `PipelineAgent`,
+driven per document by `run_pipeline.py`: Looker (`fetch_and_sample` +
+`structural_inspector`) runs once, then Thinker → Tester → Eval
+(`generate_parser_script` → `sandbox_execute` → `evaluate_extraction`) loops
+with feedback, bounded by `config.MAX_EXTRACTION_ATTEMPTS` — the single
+constant both the agent and `evaluate_extraction` read, rather than two
+copies that had to be kept in sync by hand. A passing result is delivered by
+`write_parquet_to_gcs`. Don't reach for `orchestrator.py` or `phase1-4` —
 they aren't wired to anything and `orchestrator.py`'s own imports are
 already broken.
 
@@ -115,22 +118,27 @@ written here.
 
 ## Output
 
-Tool 6 (`load_to_bigquery`) loads every document's rows into **one shared
-BigQuery table**, partitioned by extraction date and clustered by guid, with
-each document's own columns carried in a JSON column. There is no per-phase
-GCS artifact structure (no `extractors_v<N>.py`, no status ledger, no
-async GCS writer) in the live pipeline — that belonged to the legacy
-Phase 4 design. See [TOOLS.md](TOOLS.md#tool-6--load_to_bigquery) for the
-append-and-dedup-at-read pattern, and note `write_parquet_to_gcs` as the
-unwired alternative that writes one Parquet file per document instead.
+Tool 6 (`write_parquet_to_gcs`) writes every document's rows to **its own
+Parquet file**, guid-partitioned (`gs://<bucket>/<prefix>/guid=<guid>/part-0000.parquet`),
+with that document's own columns as real Parquet columns rather than a JSON
+blob. There is no per-phase GCS artifact structure (no `extractors_v<N>.py`,
+no status ledger, no async GCS writer) in the live pipeline — that belonged
+to the legacy Phase 4 design. See
+[TOOLS.md](TOOLS.md#tool-6--write_parquet_to_gcs) for why a fixed path
+(no date) makes re-extraction exactly-once by construction. The earlier
+BigQuery loader (`load_to_bigquery`, one shared table, JSON column, append +
+read-time dedup) is retired — see `retired/README.md`.
 
 ## Local vLLM Configuration
 
 - **Model**: `QuantTrio/Qwen3-Coder-30B-A3B-Instruct-GPTQ-Int8` (30B params, code-tuned)
 - **Endpoint**: `http://localhost:8000` (OpenAI-compatible API)
 - **Timeout**: 300s per request
-- **Temperature**: 0.0 for Tool 3's first generation, 0.3 for retries (more room to try something different after a failure)
-- **Max tokens**: ~2000 for a generated parser (`GenerateParserScriptTool._output_budget`)
+- **Temperature**: 0.0 for Tool 2 (structural_inspector) always, and for Tool 3's
+  first generation; 0.3 for Tool 3's retries (more room to try something
+  different after a failure)
+- **Max tokens**: ~2000 for a generated parser (`GenerateParserScriptTool._output_budget`),
+  ~800 for Tool 2's structural spec (`StructuralInspectorTool.MAX_TOKENS`)
 
 If vLLM is unavailable:
 ```bash
@@ -154,7 +162,10 @@ table. If nothing's pending, run
 Tool 3's cache key is the document's *structure* (delimiter, header shape,
 field counts), not its meaning. A cache hit means "a parser for this shape
 exists," not "this parser is right for this document" — that's still
-Tool 5's job to verify per document.
+Tool 5's job to verify per document. Tool 2 (`structural_inspector`) has no
+such cache at all: its spec (footer location, null tokens) is specific to one
+document, not a reusable shape, so every document costs one LLM call there
+regardless of how many share a delimiter.
 
 ### Mistake 4: Clearing the schema/code cache in a shared environment
 `get_cache().clear()` (used by tests) wipes `cache/schema_code_cache.db` for
@@ -164,12 +175,15 @@ against the shared `cache/` directory casually.
 
 ## Cost / performance intuition
 
-Tool 3 (LLM generation) is the expensive, GPU-bound step; a cache hit skips
-it entirely. Tools 1, 2, 4, 5, 6 are deterministic/local (BigQuery I/O,
-sandboxed Python, or a BigQuery load) and don't call vLLM. There's no
-maintained cost model doc for this pipeline the way the legacy Phase 1-4
-design had one — treat any per-document dollar figure you find in old
-material as describing the *old* design, not this one.
+Tools 2 and 3 are the GPU-bound steps. Tool 3 (parser generation) is cached
+by structure, so a cache hit skips the vLLM call entirely; Tool 2
+(`structural_inspector`) is not cached and calls vLLM on every document,
+since its spec is document-specific (footer location, null tokens), not a
+reusable shape. Tools 1, 4, 5, 6 are deterministic/local (sampling, sandboxed
+Python, or a GCS write) and don't call vLLM. There's no maintained cost model
+doc for this pipeline the way the legacy Phase 1-4 design had one — treat any
+per-document dollar figure you find in old material as describing the *old*
+design, not this one.
 
 ## Questions?
 

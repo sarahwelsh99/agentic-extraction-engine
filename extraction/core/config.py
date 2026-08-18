@@ -28,6 +28,13 @@ VLLM_MODEL = os.getenv("VLLM_MODEL", "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-GPT
 VLLM_TIMEOUT = int(os.getenv("VLLM_TIMEOUT", "300"))
 VLLM_MAX_RETRIES = int(os.getenv("VLLM_MAX_RETRIES", "3"))
 
+# ===== Pipeline Agent (Looker -> Thinker -> Tester -> Eval) =====
+# Attempts at generating a working script, including the first. The single
+# source of truth for the retry ceiling: extraction/core/pipeline_agent.py and
+# tools/evaluate_extraction/tool.py both read this rather than each keeping
+# their own copy, which previously had to be kept in sync by hand.
+MAX_EXTRACTION_ATTEMPTS = int(os.getenv("MAX_EXTRACTION_ATTEMPTS", "2"))
+
 # ===== Phase Configuration =====
 # Phase 1: Pattern Analysis & Code Generation
 PHASE1_SAMPLES_PER_SOURCE = int(os.getenv("PHASE1_SAMPLES_PER_SOURCE", "20"))

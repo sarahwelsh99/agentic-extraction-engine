@@ -47,6 +47,9 @@ quote_char = job.get("quote_char") or '"'
 header_row_index = job.get("header_row_index", 0)
 min_field_count = job.get("min_field_count") or 0
 column_names = job.get("column_names") or []
+# From the Looker's structural_inspector: trailing rows (totals, page
+# markers) that are not part of the table. 0 when there is no footer.
+skip_footer_lines = job.get("skip_footer_lines") or 0
 # The generated parser reads its target width from this name rather
 # than embedding it, so one cached parser serves every width.
 field_count = int(job.get("field_count") or len(column_names) or 1)
@@ -70,6 +73,13 @@ try:
     else:
         data_rows = rows
         first_data_offset = 1
+
+    # Trim the footer before it ever reaches parse_row or counts as a data
+    # row - a "Total: 3 rows" line is not a row of the table, and left in it
+    # skews both extraction (the parser is handed a row it cannot read) and
+    # evaluation (it inflates the source row count coverage is measured against).
+    if skip_footer_lines:
+        data_rows = data_rows[:-skip_footer_lines] if skip_footer_lines < len(data_rows) else []
 
     # Keep the rows the generated code can actually address. A worksheet often
     # holds a form or a second table alongside the one that was profiled, and

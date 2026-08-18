@@ -8,32 +8,25 @@ import json
 from tools.sandbox_execute.tool import SandboxExecuteTool
 
 
-def test_error_handling_missing_code():
-    """Test error handling for missing generated_code."""
+def test_error_handling_missing_inputs():
+    """Missing generated_code or missing body_text are both refused outright."""
     tool = SandboxExecuteTool()
 
-    response = json.loads(tool({
+    no_code = json.loads(tool({
         "guid": "test-guid",
         "body_text": "id,name\n1,John",
     }))
-    assert response["status"] == "error"
-    assert "generated_code" in response["error"].lower()
+    assert no_code["status"] == "error"
+    assert "generated_code" in no_code["error"].lower()
 
-    print("\u2713 test_error_handling_missing_code PASSED")
-
-
-def test_error_handling_missing_body_text():
-    """Test error handling for missing body_text."""
-    tool = SandboxExecuteTool()
-
-    response = json.loads(tool({
+    no_body = json.loads(tool({
         "guid": "test-guid",
         "generated_code": "class DataExtractor: pass",
     }))
-    assert response["status"] == "error"
-    assert "body_text" in response["error"].lower()
+    assert no_body["status"] == "error"
+    assert "body_text" in no_body["error"].lower()
 
-    print("\u2713 test_error_handling_missing_body_text PASSED")
+    print("\u2713 test_error_handling_missing_inputs PASSED")
 
 
 def test_executes_and_names_columns():
@@ -208,10 +201,44 @@ def test_named_field_scripts_are_normalized_too():
     print("✓ test_named_field_scripts_are_normalized_too PASSED")
 
 
+def test_footer_lines_are_skipped():
+    """A footer reported by the Looker never reaches parse_row or counts as data."""
+    tool = SandboxExecuteTool()
+
+    code = (
+        "from typing import Dict, Any, List\n"
+        "class DataExtractor:\n"
+        "    @staticmethod\n"
+        "    def parse_row(row: List[str]) -> Dict[str, Any]:\n"
+        "        values = [v.strip() or None for v in row][:FIELD_COUNT]\n"
+        "        values += [None] * (FIELD_COUNT - len(values))\n"
+        "        return {'values': values, '_valid': True, '_errors': []}\n"
+    )
+    response = json.loads(tool({
+        "guid": "test-guid",
+        "generated_code": code,
+        "body_text": "id,name\n1,John\n2,Jane\nTotal: 2 rows\nConfidential",
+        "metadata_report": {
+            "delimiter": ",",
+            "header_row_index": 0,
+            "header_names": ["id", "name"],
+            "modal_field_count": 2,
+            "footer_start_from_bottom": 2,
+        },
+    }))
+
+    assert response["status"] == "success", response
+    rows = response["extracted_rows"]
+    assert len(rows) == 2, rows
+    assert response["total_rows"] == 2, "the footer must not count as data"
+
+    print("✓ test_footer_lines_are_skipped PASSED")
+
+
 def run_all_tests():
     tests = [
-        test_error_handling_missing_code,
-        test_error_handling_missing_body_text,
+        test_error_handling_missing_inputs,
+        test_footer_lines_are_skipped,
         test_executes_and_names_columns,
         test_unnamed_columns_fall_back_to_position,
         test_untrimmed_script_matches_trimming_one,

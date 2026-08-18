@@ -9,3 +9,6 @@ removed, and the reasons for removal were scope decisions rather than defects.
 | `map_to_schema` | Tool 6, mapped extracted columns onto the mosaic schema | The pipeline now loads a document's own columns to a per-guid table, so there is no shared schema to map onto |
 | `column_labeler` | Model-backed column classifier used by `map_to_schema` | Same reason. Correctly labelled `Mail ID`, `Cell`, `Zip`, `SIN`, `Nombre`, `Courriel`, and returned nothing for `Application ID`, `Audit Date`, `Ticket #` |
 | `write_to_gcs` | Wrote NDJSON to GCS with Hive partitioning | Output goes to BigQuery instead |
+| `delimiter_detector` | Tool 2, regex/heuristic structure detection (delimiter voting, header-row scoring, quote-char detection) | Superseded by `structural_inspector`, which asks the model for a richer structural spec (head/tail bounds, footer patterns, null values) from a bounded head+tail slice instead |
+| `load_to_bigquery` | Tool 6, loaded extractions into one shared BigQuery table with a JSON column | Output goes to GCS as Parquet instead (`write_parquet_to_gcs`) — see that tool's docstring |
+| `provision_extraction_table.py` | Created/validated `load_to_bigquery`'s BigQuery table | No longer needed: `write_parquet_to_gcs` writes to an existing bucket with no schema to provision |

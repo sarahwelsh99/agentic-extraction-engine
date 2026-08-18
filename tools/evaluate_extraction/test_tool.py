@@ -2,7 +2,7 @@
 
 Tool 5 answers one question — did the extraction work? — by comparing what came
 out against the source. These tests pin that answer, because it decides whether
-a document reaches BigQuery.
+a document reaches delivery.
 """
 
 import json
@@ -11,7 +11,8 @@ from tools.evaluate_extraction.tool import EvaluateExtractionTool
 REPORT = {"modal_field_count": 3, "header_names": ["id", "name", "email"]}
 
 
-def _evaluate(rows, rows_in=None, attempt=1, status="success", error=None):
+def _evaluate(rows, rows_in=None, attempt=1, status="success", error=None,
+              report=None):
     execution = {
         "status": status,
         "extracted_rows": rows,
@@ -22,7 +23,7 @@ def _evaluate(rows, rows_in=None, attempt=1, status="success", error=None):
     return json.loads(EvaluateExtractionTool()({
         "guid": "g",
         "execution_result": execution,
-        "metadata_report": REPORT,
+        "metadata_report": report if report is not None else REPORT,
         "attempt": attempt,
     }))
 
@@ -35,134 +36,92 @@ def _rows(valid, invalid=0):
     return rows
 
 
-def test_clean_extraction_passes():
-    """Every source row accounted for and parsed cleanly."""
-    r = _evaluate(_rows(50), rows_in=50)
+def test_passing_cases():
+    """Every source row accounted for and parsed cleanly - a few bad rows included."""
+    clean = _evaluate(_rows(50), rows_in=50)
+    assert clean["extraction_passed"] is True
+    assert clean["failure_reason"] is None
+    assert clean["should_retry"] is False
+    assert clean["evaluation"]["source_coverage"] == 1.0
 
-    assert r["extraction_passed"] is True
-    assert r["failure_reason"] is None
-    assert r["should_retry"] is False
-    assert r["evaluation"]["source_coverage"] == 1.0
+    mostly_clean = _evaluate(_rows(48, 2), rows_in=50)
+    assert mostly_clean["extraction_passed"] is True, mostly_clean["failure_reason"]
 
-    print("✓ test_clean_extraction_passes PASSED")
-
-
-def test_a_few_bad_rows_still_passes():
-    """Real documents contain some bad rows; that is not a failed extraction."""
-    r = _evaluate(_rows(48, 2), rows_in=50)
-
-    assert r["extraction_passed"] is True, r["failure_reason"]
-
-    print("✓ test_a_few_bad_rows_still_passes PASSED")
+    print("✓ test_passing_cases PASSED")
 
 
-def test_mostly_unparsed_rows_fails():
-    """If most returned rows did not parse, the script did not work."""
-    r = _evaluate(_rows(10, 40), rows_in=50)
+def test_quality_threshold_failures():
+    """Too few valid rows, or too few rows returned at all, both fail."""
+    mostly_unparsed = _evaluate(_rows(10, 40), rows_in=50)
+    assert mostly_unparsed["extraction_passed"] is False
+    assert "parsed cleanly" in mostly_unparsed["failure_reason"]
+    assert "could not read field 2" in mostly_unparsed["failure_reason"]
 
-    assert r["extraction_passed"] is False
-    assert "parsed cleanly" in r["failure_reason"]
-    # The reason carries a real error so the next attempt can act on it
-    assert "could not read field 2" in r["failure_reason"]
+    dropped_rows = _evaluate(_rows(2), rows_in=1000)
+    assert dropped_rows["extraction_passed"] is False
+    assert "from 1000 source rows" in dropped_rows["failure_reason"]
 
-    print("✓ test_mostly_unparsed_rows_fails PASSED")
-
-
-def test_dropped_rows_fails_even_when_those_returned_are_perfect():
-    """Two perfect rows out of a thousand is not a working extraction."""
-    r = _evaluate(_rows(2), rows_in=1000)
-
-    assert r["extraction_passed"] is False
-    assert "from 1000 source rows" in r["failure_reason"]
-
-    print("✓ test_dropped_rows_fails_even_when_those_returned_are_perfect PASSED")
+    print("✓ test_quality_threshold_failures PASSED")
 
 
-def test_nothing_returned_from_a_populated_source_fails():
-    r = _evaluate([], rows_in=25)
+def test_no_rows_cases_are_distinguished():
+    """Nothing returned from a populated source, vs. an empty source itself."""
+    populated_source = _evaluate([], rows_in=25)
+    assert populated_source["extraction_passed"] is False
+    assert "returned none" in populated_source["failure_reason"]
 
-    assert r["extraction_passed"] is False
-    assert "returned none" in r["failure_reason"]
+    empty_source = _evaluate([], rows_in=0)
+    assert empty_source["extraction_passed"] is False
+    assert "no data rows" in empty_source["failure_reason"]
 
-    print("✓ test_nothing_returned_from_a_populated_source_fails PASSED")
-
-
-def test_empty_source_does_not_pass_but_is_named_as_such():
-    """Nothing to extract is distinguished from a broken script."""
-    r = _evaluate([], rows_in=0)
-
-    assert r["extraction_passed"] is False
-    assert "no data rows" in r["failure_reason"]
-
-    print("✓ test_empty_source_does_not_pass_but_is_named_as_such PASSED")
+    print("✓ test_no_rows_cases_are_distinguished PASSED")
 
 
-def test_script_that_would_not_run_is_retried_with_the_error():
-    r = _evaluate([], status="error", error="NameError: name 'person' is not defined")
+def test_retry_behavior():
+    """A script that would not run is retried with the error - until the ceiling."""
+    first_attempt = _evaluate([], status="error",
+                              error="NameError: name 'person' is not defined")
+    assert first_attempt["extraction_passed"] is False
+    assert first_attempt["should_retry"] is True
+    assert "NameError" in first_attempt["failure_reason"]
 
-    assert r["extraction_passed"] is False
-    assert r["should_retry"] is True
-    assert "NameError" in r["failure_reason"]
+    final_attempt = _evaluate(_rows(1, 49), rows_in=50,
+                              attempt=EvaluateExtractionTool.MAX_ATTEMPTS)
+    assert final_attempt["extraction_passed"] is False
+    assert final_attempt["should_retry"] is False
 
-    print("✓ test_script_that_would_not_run_is_retried_with_the_error PASSED")
-
-
-def test_no_retry_on_the_final_attempt():
-    r = _evaluate(_rows(1, 49), rows_in=50,
-                  attempt=EvaluateExtractionTool.MAX_ATTEMPTS)
-
-    assert r["extraction_passed"] is False
-    assert r["should_retry"] is False
-
-    print("✓ test_no_retry_on_the_final_attempt PASSED")
+    print("✓ test_retry_behavior PASSED")
 
 
-def test_short_column_delivery_is_retried():
-    """Fewer columns than specified means values are landing under wrong names.
-
-    Real case: a staff roster whose table is 26 columns wide. The script returned
-    four values per row, and because the caller pairs position to name, those
-    four were labelled with the header's first four names — Team, Skill,
-    Aze_User, Name Surname — holding a user id and a duration. Nothing else
-    catches it: the rows parse, and the row count matches.
+def test_column_delivery_threshold():
+    """Real case: a staff roster whose table is 26 columns wide. The script
+    returned four values per row, and because the caller pairs position to
+    name, those four were labelled with the header's first four names - Team,
+    Skill, Aze_User, Name Surname - holding a user id and a duration. Nothing
+    else catches it: the rows parse, and the row count matches. A column or
+    two short of that is normal trimming, not a mislabelling.
     """
-    rows = [
+    short_rows = [
         {"c0": "v", "c1": "v", "c2": "v", "c3": "v", "_valid": True, "_row_number": i}
         for i in range(20)
     ]
-    r = json.loads(EvaluateExtractionTool()({
-        "guid": "g",
-        "execution_result": {"status": "success", "extracted_rows": rows, "total_rows": 20},
-        "metadata_report": {"modal_field_count": 26, "header_field_count": 43},
-        "attempt": 1,
-    }))
+    short = _evaluate(short_rows, rows_in=20,
+                      report={"modal_field_count": 26, "header_field_count": 43})
+    assert short["extraction_passed"] is False
+    assert short["should_retry"] is True
+    assert "wrong column names" in short["failure_reason"]
+    assert "26 values per row" in short["failure_reason"]
+    assert short["evaluation"]["column_delivery"] == round(4 / 26, 3)
 
-    assert r["extraction_passed"] is False
-    assert r["should_retry"] is True
-    assert "wrong column names" in r["failure_reason"]
-    # the reason tells the next attempt exactly what to do
-    assert "26 values per row" in r["failure_reason"]
-    assert r["evaluation"]["column_delivery"] == round(4 / 26, 3)
-
-    print("\u2713 test_short_column_delivery_is_retried PASSED")
-
-
-def test_slightly_short_delivery_still_passes():
-    """A column or two short is normal trimming, not a mislabelling."""
-    rows = [
+    slightly_short_rows = [
         {f"c{i}": "v" for i in range(25)} | {"_valid": True, "_row_number": n}
         for n in range(20)
     ]
-    r = json.loads(EvaluateExtractionTool()({
-        "guid": "g",
-        "execution_result": {"status": "success", "extracted_rows": rows, "total_rows": 20},
-        "metadata_report": {"modal_field_count": 26},
-        "attempt": 1,
-    }))
+    slightly_short = _evaluate(slightly_short_rows, rows_in=20,
+                               report={"modal_field_count": 26})
+    assert slightly_short["extraction_passed"] is True, slightly_short["failure_reason"]
 
-    assert r["extraction_passed"] is True, r["failure_reason"]
-
-    print("\u2713 test_slightly_short_delivery_still_passes PASSED")
+    print("✓ test_column_delivery_threshold PASSED")
 
 
 def test_missing_execution_result_is_an_error():
@@ -176,16 +135,11 @@ def test_missing_execution_result_is_an_error():
 
 def run_all_tests():
     tests = [
-        test_clean_extraction_passes,
-        test_a_few_bad_rows_still_passes,
-        test_mostly_unparsed_rows_fails,
-        test_dropped_rows_fails_even_when_those_returned_are_perfect,
-        test_nothing_returned_from_a_populated_source_fails,
-        test_empty_source_does_not_pass_but_is_named_as_such,
-        test_script_that_would_not_run_is_retried_with_the_error,
-        test_no_retry_on_the_final_attempt,
-        test_short_column_delivery_is_retried,
-        test_slightly_short_delivery_still_passes,
+        test_passing_cases,
+        test_quality_threshold_failures,
+        test_no_rows_cases_are_distinguished,
+        test_retry_behavior,
+        test_column_delivery_threshold,
         test_missing_execution_result_is_an_error,
     ]
     passed = failed = 0
