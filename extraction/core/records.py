@@ -99,6 +99,21 @@ class SheetBlock:
     body_text: str
 
 
+def _looks_like_header_row(text: str) -> bool:
+    """A lightweight, delimiter-agnostic signal for "this looks like a real
+    header row" (several distinct cells) versus "this is just another
+    title/tab-name" (one real cell plus trailing empties, or none at all).
+    Comma is used as the probe delimiter since every multi-sheet document
+    seen in production is comma-delimited; the safe failure mode for a
+    document that turns out to use another delimiter is treating a real
+    header as another title-like row instead - the Structural Inspector
+    still sees it as ordinary content either way, just one line later as
+    that sheet's own first content line rather than folded further up.
+    """
+    non_empty = [c for c in text.split(",") if c.strip()]
+    return len(non_empty) >= 2
+
+
 def split_sheets(body_text: str) -> List[SheetBlock]:
     """Split a flattened document into its worksheets, preserving position.
 
@@ -106,12 +121,18 @@ def split_sheets(body_text: str) -> List[SheetBlock]:
     to collect names into a side list - it discards *where* a sheet's data
     begins and ends, so every sheet's rows land in one flat, unattributed
     list. This walks the same rows but keeps that boundary: a marker row
-    starts a new sheet and supplies its name; a document is commonly flattened
-    with a second marker-terminated row right after the name (that sheet's
-    own candidate header), which is kept as that sheet's own first line
-    rather than treated as another sheet - the Structural Inspector resolves
-    whether it's a real header exactly as it already does for a
-    single-table document.
+    starts a new sheet and supplies its name. A document is sometimes
+    flattened with a second marker-terminated row right after the name; that
+    is only folded into the sheet's own content (as a candidate header line -
+    the Structural Inspector resolves whether it's a real header, exactly as
+    for a single-table document) when it actually looks like a header - at
+    least two non-empty cells. A second marker row that is just another
+    title/label (one real cell) is a separate, usually-empty sheet in its own
+    right, not this sheet's header: confirmed on a real workbook where
+    "Week 1," and "WEEK 1 PGU," sat back to back - folding the second into
+    the first attributed real mentor/agent data to the wrong, empty tab and
+    swallowed the actual header line ("Mentor,Agent,Highlights,...") as
+    ordinary content instead.
 
     A sheet's own last line is genuinely its own tail (not a slice of the
     whole document's end), which matters for the Micro-Slicer's tail window.
@@ -152,15 +173,15 @@ def split_sheets(body_text: str) -> List[SheetBlock]:
     for row in rows:
         if row.endswith(SHEET_MARKER):
             text = row[: -len(SHEET_MARKER)]
-            if not in_marker_run:
+            if not in_marker_run or not _looks_like_header_row(text):
                 flush()
                 current_name = text
                 current_lines = []
                 in_marker_run = True
             else:
-                # A marker row immediately following another one (the
-                # sheet's own header line, typically) is this sheet's
-                # content, not a second sheet name.
+                # A marker row immediately following another one, that
+                # itself looks like a real header (>= 2 non-empty cells),
+                # is this sheet's content - not a third+ sheet name.
                 cleaned = strip_zero_width(text.replace(CELL_NEWLINE, " ")).strip()
                 if cleaned:
                     current_lines.append(cleaned)

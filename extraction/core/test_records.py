@@ -63,6 +63,31 @@ def test_multiple_sheets_are_split_with_their_own_header_and_data():
     print("✓ test_multiple_sheets_are_split_with_their_own_header_and_data PASSED")
 
 
+def test_a_second_marker_row_that_is_not_a_header_is_its_own_sheet():
+    """Real bug found on guid ae09945d-bb1b-c996-06a8-6a87b3dcc1ac: two
+    marker rows back to back are not always "name, then this sheet's own
+    header" - sometimes they're two separate, usually-empty tabs ("Week 1,"
+    then "WEEK 1 PGU,"). Folding the second into the first attributed real
+    data to the wrong (empty) tab and swallowed the actual header
+    ("Mentor,Agent,Highlights,...") as ordinary content instead."""
+    body = ROW_SEPARATOR.join([
+        f"Week 1,{SHEET_MARKER}",
+        f"WEEK 1 PGU,{SHEET_MARKER}",
+        "Mentor,Agent,Highlights,Lowlights,Actions taken,",
+        "Glendi,Sara,good tone,,",
+    ])
+
+    blocks = split_sheets(body)
+
+    assert len(blocks) == 2
+    assert blocks[0].name == "Week 1,"
+    assert blocks[0].body_text == "", "an empty tab must stay empty, not swallow the next tab's header"
+    assert blocks[1].name == "WEEK 1 PGU,"
+    assert blocks[1].body_text.split(ROW_SEPARATOR)[0] == "Mentor,Agent,Highlights,Lowlights,Actions taken,"
+
+    print("✓ test_a_second_marker_row_that_is_not_a_header_is_its_own_sheet PASSED")
+
+
 def test_each_sheets_tail_is_its_own_not_the_documents():
     """A sheet's last line must be that sheet's own last line, not a slice of
     the whole document's end - this is what fixes the Micro-Slicer's tail
@@ -93,6 +118,7 @@ def run_all_tests():
         test_ordinary_document_is_a_single_unnamed_sheet,
         test_single_sheet_marker_is_still_single_sheet,
         test_multiple_sheets_are_split_with_their_own_header_and_data,
+        test_a_second_marker_row_that_is_not_a_header_is_its_own_sheet,
         test_each_sheets_tail_is_its_own_not_the_documents,
         test_empty_document_is_a_single_empty_sheet,
     ]
