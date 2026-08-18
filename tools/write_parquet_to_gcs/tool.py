@@ -163,14 +163,27 @@ class WriteParquetToGcsTool:
                     skipped.append(guid)
                     continue
 
+                # Two genuinely different sheets can share an identical raw
+                # tab name (seen in production); every file for this guid
+                # still needs its own path, so a repeated slug earns a
+                # disambiguating suffix rather than silently overwriting the
+                # first sheet's file with the second's.
+                used_slugs: Dict[str, int] = {}
                 for sheet_name, sheet_rows in self._group_by_sheet(rows):
-                    table = self._build_table(guid, sheet_rows, extracted_at, sheet_name)
-                    size = self._upload(guid, table, sheet_name)
+                    display_name = sheet_name
+                    if sheet_name is not None:
+                        slug = self._slug(sheet_name)
+                        used_slugs[slug] = used_slugs.get(slug, 0) + 1
+                        if used_slugs[slug] > 1:
+                            display_name = f"{sheet_name} ({used_slugs[slug]})"
+
+                    table = self._build_table(guid, sheet_rows, extracted_at, display_name)
+                    size = self._upload(guid, table, display_name)
 
                     written.append({
                         "guid": guid,
-                        "sheet_name": sheet_name,
-                        "uri": self.uri(guid, sheet_name),
+                        "sheet_name": display_name,
+                        "uri": self.uri(guid, display_name),
                         "rows": table.num_rows,
                         "columns": table.num_columns,
                         "bytes": size,
@@ -206,28 +219,36 @@ class WriteParquetToGcsTool:
     def _group_by_sheet(
         self, rows: List[Dict[str, Any]]
     ) -> List[Tuple[Optional[str], List[Dict[str, Any]]]]:
-        """Split one document's rows into its sheets, in first-seen order.
+        """Split one document's rows into its sheets, by consecutive run.
+
+        Grouped by *run*, not by a dict keyed on the name across the whole
+        list: run_pipeline.py's merge already lays out one sheet's rows
+        contiguously before the next sheet's begin, but two genuinely
+        different sheets can share an identical raw tab name (confirmed on a
+        real workbook with two separate tabs both named "WEEK 1 PGU,").
+        Grouping globally by name would silently recombine them into the same
+        wide, unioned-schema file this per-sheet split exists to avoid -
+        grouping by adjacency instead keeps every sheet PipelineAgent actually
+        treated as separate, separate here too, whatever it happens to be
+        named.
 
         A row without SHEET_KEY (the ordinary, single-table document) is its
-        own group keyed None, so it takes the plain no-sheet path unchanged.
-        SHEET_KEY itself is dropped from each row's own content - once it is
-        the partition, repeating it as a constant column in every row of the
-        file it names would be redundant.
+        own single run keyed None. SHEET_KEY itself is dropped from each row's
+        own content - once it is the partition, repeating it as a constant
+        column in every row of the file it names would be redundant.
 
         Rows and, transitively, each group's own column order are preserved
         exactly as they arrived - nothing here sorts or re-keys either one.
         """
-        groups: Dict[Optional[str], List[Dict[str, Any]]] = {}
-        order: List[Optional[str]] = []
+        runs: List[Tuple[Optional[str], List[Dict[str, Any]]]] = []
         for row in rows:
             sheet_name = row.get(self.SHEET_KEY)
-            if sheet_name not in groups:
-                groups[sheet_name] = []
-                order.append(sheet_name)
-            groups[sheet_name].append(
-                {k: v for k, v in row.items() if k != self.SHEET_KEY}
-            )
-        return [(name, groups[name]) for name in order]
+            clean_row = {k: v for k, v in row.items() if k != self.SHEET_KEY}
+            if runs and runs[-1][0] == sheet_name:
+                runs[-1][1].append(clean_row)
+            else:
+                runs.append((sheet_name, [clean_row]))
+        return runs
 
     def _ordered_columns(self, rows: List[Dict[str, Any]]) -> List[str]:
         """Column order for the file: first appearance across every row.

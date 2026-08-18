@@ -108,6 +108,37 @@ def test_sheets_get_their_own_file_not_one_wide_unioned_table():
     print("✓ test_sheets_get_their_own_file_not_one_wide_unioned_table PASSED")
 
 
+def test_two_sheets_sharing_a_name_do_not_collapse_into_one_file():
+    """Real bug found on guid ae09945d-bb1b-c996-06a8-6a87b3dcc1ac: two
+    genuinely separate tabs were both literally named "WEEK 1 PGU," -
+    grouping by name globally (rather than by the contiguous run each
+    actually arrived in) silently merged them back into one wide file, and
+    even once grouped by run, writing them both to the same slugified path
+    would have let the second overwrite the first."""
+    client = _StubClient()
+    rows = [
+        {"Mentor": "Glendi", "Agent": "Sara", "_valid": True, "_row_number": 2, "_sheet_name": "WEEK 1 PGU,"},
+        {"Mentor": "Andres", "Agent": "Carlos", "_valid": True, "_row_number": 2, "_sheet_name": "WEEK 1 PGU,"},
+        {"Team": "X", "Score": "5", "_valid": True, "_row_number": 2, "_sheet_name": "Other Sheet"},
+        {"Mentor": "Marcela", "Agent": "Oscar", "_valid": True, "_row_number": 2, "_sheet_name": "WEEK 1 PGU,"},
+    ]
+    r = json.loads(_writer(client)({"guid": "dup-1", "extracted_rows": rows}))
+
+    assert r["status"] == "success", r
+    assert r["files_written"] == 3, "three separate runs, even though two share a name"
+    assert len(client._bucket.blobs) == 3
+
+    first = pq.read_table(io.BytesIO(client._bucket.blobs["test/guid=dup-1/WEEK_1_PGU.parquet"].data))
+    assert first.num_rows == 2, "only the first run's two rows, not merged with the third"
+
+    second = pq.read_table(io.BytesIO(
+        client._bucket.blobs["test/guid=dup-1/WEEK_1_PGU_2.parquet"].data
+    ))
+    assert second.num_rows == 1, "the later, separate run with the same name got its own file"
+
+    print("✓ test_two_sheets_sharing_a_name_do_not_collapse_into_one_file PASSED")
+
+
 def test_sheet_name_is_slugified_for_a_safe_filename():
     """Sheet names are raw source tab names and can carry commas, slashes,
     or nothing usable at all - none of which belong in a GCS path."""
@@ -180,6 +211,7 @@ def run_all_tests():
     tests = [
         test_document_gets_its_own_parquet_file_with_typed_bookkeeping,
         test_sheets_get_their_own_file_not_one_wide_unioned_table,
+        test_two_sheets_sharing_a_name_do_not_collapse_into_one_file,
         test_sheet_name_is_slugified_for_a_safe_filename,
         test_many_documents_write_one_file_each,
         test_empty_document_is_skipped_not_failed,
