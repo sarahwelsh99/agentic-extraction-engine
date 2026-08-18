@@ -5,14 +5,31 @@ Parquet columns. There is no shared schema across the corpus and no JSON blob:
 a payroll sheet's file has the payroll sheet's columns, and the next file has
 different ones.
 
-    gs://<bucket>/<prefix>/guid=<guid>/part-0000.parquet
+    gs://<bucket>/<prefix>/guid=<guid>/<guid>.parquet
 
-Partitioned by guid alone, deliberately without a date. Writing to a fixed path
-per document makes a re-extraction overwrite its predecessor, so the output is
-exactly-once by construction. A date in the path would leave two files for a
-reprocessed document with nothing to say which one counts — and unlike the
-BigQuery table this replaced, there is no read-time dedup to fall back on.
-The extraction timestamp is carried in the file's own metadata instead.
+A document that carries more than one worksheet (extraction/core/records.py's
+split_sheets(); rows tagged with "_sheet_name" by run_pipeline.py's merge)
+gets one file *per sheet* instead of one wide file unioning every sheet's
+columns into a mostly-NULL table, named for the sheet rather than the guid:
+
+    gs://<bucket>/<prefix>/guid=<guid>/<sheet_slug>.parquet
+
+Sheets are genuinely different tables - different headers, different meaning
+- so forcing them into one schema just replaces "which columns does this row
+actually have" with "which of these 160 columns are NULL for this row." Each
+sheet's own file has only its own columns, and "_sheet_name" is dropped from
+the row content once it's the filename itself. An ordinary single-sheet
+document (the common case) still gets exactly the plain, guid-named path
+above, unchanged.
+
+Partitioned by guid (every sheet's file still sits under that document's own
+guid= directory) and named for the sheet or the guid, deliberately without a
+date. Writing to a fixed path per document/sheet makes a re-extraction
+overwrite its predecessor, so the output is exactly-once by construction. A
+date in the path would leave two files for a reprocessed document with
+nothing to say which one counts — and unlike the BigQuery table this
+replaced, there is no read-time dedup to fall back on. The extraction
+timestamp is carried in the file's own metadata instead.
 
 Every value is written as a string. The parser deliberately infers no types, so
 typing them here would be inventing information the pipeline does not have.
@@ -25,8 +42,9 @@ column genuinely called "valid".
 import io
 import json
 import logging
+import re
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -84,14 +102,31 @@ class WriteParquetToGcsTool:
         # it succeeds.
         self._bucket = self._client.bucket(self.bucket_name)
 
-    def blob_path(self, guid: str) -> str:
-        return f"{self.prefix}/guid={guid}/part-0000.parquet"
+    SHEET_KEY = "_sheet_name"
 
-    def uri(self, guid: str) -> str:
-        return f"gs://{self.bucket_name}/{self.blob_path(guid)}"
+    def blob_path(self, guid: str, sheet_name: Optional[str] = None) -> str:
+        """The file is named for the sheet when there is one, and for the
+        guid itself when there isn't (an ordinary single-table document, no
+        sheet to name it after)."""
+        filename = self._slug(sheet_name) if sheet_name is not None else guid
+        return f"{self.prefix}/guid={guid}/{filename}.parquet"
+
+    def uri(self, guid: str, sheet_name: Optional[str] = None) -> str:
+        return f"gs://{self.bucket_name}/{self.blob_path(guid, sheet_name)}"
+
+    @staticmethod
+    def _slug(name: str) -> str:
+        """A filesystem/URL-safe filename for a sheet name.
+
+        Sheet names are the source workbook's own tab names verbatim, so they
+        can carry commas, slashes, spaces or nothing usable at all - none of
+        which belong in a GCS object path.
+        """
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name or "").strip("_")
+        return safe[:80] or "unnamed"
 
     def __call__(self, inputs: Dict[str, Any]) -> str:
-        """Write one document, or a batch of them, as one file each.
+        """Write one document, or a batch of them - one file per sheet.
 
         Args:
             inputs: either
@@ -116,6 +151,7 @@ class WriteParquetToGcsTool:
             written: List[Dict[str, Any]] = []
             skipped: List[str] = []
             rows_total = bytes_total = 0
+            guids_written = set()
 
             for document in documents:
                 guid = document.get("guid", "unknown")
@@ -127,31 +163,36 @@ class WriteParquetToGcsTool:
                     skipped.append(guid)
                     continue
 
-                table = self._build_table(guid, rows, extracted_at)
-                size = self._upload(guid, table)
+                for sheet_name, sheet_rows in self._group_by_sheet(rows):
+                    table = self._build_table(guid, sheet_rows, extracted_at, sheet_name)
+                    size = self._upload(guid, table, sheet_name)
 
-                written.append({
-                    "guid": guid,
-                    "uri": self.uri(guid),
-                    "rows": table.num_rows,
-                    "columns": table.num_columns,
-                    "bytes": size,
-                })
-                rows_total += table.num_rows
-                bytes_total += size
+                    written.append({
+                        "guid": guid,
+                        "sheet_name": sheet_name,
+                        "uri": self.uri(guid, sheet_name),
+                        "rows": table.num_rows,
+                        "columns": table.num_columns,
+                        "bytes": size,
+                    })
+                    rows_total += table.num_rows
+                    bytes_total += size
+                guids_written.add(guid)
 
             if written:
                 logger.info(
-                    f"Wrote {len(written)} Parquet file(s), {rows_total} row(s), "
-                    f"{bytes_total/1e6:.1f} MB to gs://{self.bucket_name}/{self.prefix}/"
+                    f"Wrote {len(written)} Parquet file(s) for {len(guids_written)} "
+                    f"document(s), {rows_total} row(s), {bytes_total/1e6:.1f} MB to "
+                    f"gs://{self.bucket_name}/{self.prefix}/"
                 )
 
             return json.dumps({
                 "status": "success",
                 "bucket": self.bucket_name,
                 "prefix": self.prefix,
-                "documents_written": len(written),
+                "documents_written": len(guids_written),
                 "documents_empty": len(skipped),
+                "files_written": len(written),
                 "rows_written": rows_total,
                 "bytes_written": bytes_total,
                 "files": written,
@@ -161,6 +202,32 @@ class WriteParquetToGcsTool:
         except Exception as e:
             logger.error(f"Parquet write failed: {e}")
             return json.dumps({"status": "error", "error": str(e)})
+
+    def _group_by_sheet(
+        self, rows: List[Dict[str, Any]]
+    ) -> List[Tuple[Optional[str], List[Dict[str, Any]]]]:
+        """Split one document's rows into its sheets, in first-seen order.
+
+        A row without SHEET_KEY (the ordinary, single-table document) is its
+        own group keyed None, so it takes the plain no-sheet path unchanged.
+        SHEET_KEY itself is dropped from each row's own content - once it is
+        the partition, repeating it as a constant column in every row of the
+        file it names would be redundant.
+
+        Rows and, transitively, each group's own column order are preserved
+        exactly as they arrived - nothing here sorts or re-keys either one.
+        """
+        groups: Dict[Optional[str], List[Dict[str, Any]]] = {}
+        order: List[Optional[str]] = []
+        for row in rows:
+            sheet_name = row.get(self.SHEET_KEY)
+            if sheet_name not in groups:
+                groups[sheet_name] = []
+                order.append(sheet_name)
+            groups[sheet_name].append(
+                {k: v for k, v in row.items() if k != self.SHEET_KEY}
+            )
+        return [(name, groups[name]) for name in order]
 
     def _ordered_columns(self, rows: List[Dict[str, Any]]) -> List[str]:
         """Column order for the file: first appearance across every row.
@@ -179,9 +246,11 @@ class WriteParquetToGcsTool:
         return columns
 
     def _build_table(
-        self, guid: str, rows: List[Dict[str, Any]], extracted_at: str
+        self, guid: str, rows: List[Dict[str, Any]], extracted_at: str,
+        sheet_name: Optional[str] = None,
     ) -> pa.Table:
-        """Turn one document's rows into an Arrow table with its own columns."""
+        """Turn one sheet's (or one whole single-table document's) rows into
+        an Arrow table with only that sheet's own columns."""
         columns = self._ordered_columns(rows)
         arrays = []
         fields = []
@@ -196,6 +265,7 @@ class WriteParquetToGcsTool:
         # overwrite the file without losing when it was produced.
         schema = pa.schema(fields, metadata={
             b"guid": guid.encode(),
+            b"sheet_name": (sheet_name or "").encode(),
             b"extracted_at": extracted_at.encode(),
             b"extraction_version": self.extraction_version.encode(),
             b"row_count": str(len(rows)).encode(),
@@ -227,17 +297,18 @@ class WriteParquetToGcsTool:
             return json.dumps(value, default=str)
         return str(value)
 
-    def _upload(self, guid: str, table: pa.Table) -> int:
-        """Write one table to its document's path, replacing what was there."""
+    def _upload(self, guid: str, table: pa.Table, sheet_name: Optional[str] = None) -> int:
+        """Write one table to its document's (or sheet's) path, replacing
+        what was there."""
         buffer = io.BytesIO()
         pq.write_table(table, buffer, compression=self.COMPRESSION)
         buffer.seek(0)
 
-        blob = self._bucket.blob(self.blob_path(guid))
+        blob = self._bucket.blob(self.blob_path(guid, sheet_name))
         blob.upload_from_file(buffer, content_type="application/octet-stream")
         return blob.size or buffer.getbuffer().nbytes
 
-    def read_back(self, guid: str) -> pa.Table:
-        """Read a document's file back. For verification and tests."""
-        data = self._bucket.blob(self.blob_path(guid)).download_as_bytes()
+    def read_back(self, guid: str, sheet_name: Optional[str] = None) -> pa.Table:
+        """Read a document's (or one sheet's) file back. For verification and tests."""
+        data = self._bucket.blob(self.blob_path(guid, sheet_name)).download_as_bytes()
         return pq.read_table(io.BytesIO(data))

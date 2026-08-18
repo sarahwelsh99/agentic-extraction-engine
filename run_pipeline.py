@@ -355,6 +355,7 @@ def run_pipeline(guid: str, body_text: str = None, load: bool = True) -> dict:
             write_start, write_end, "success",
             batch_start_time=batch_start_time,
             rows_written=write_response.get("rows_written"),
+            files_written=write_response.get("files_written"),
             bucket=write_response.get("bucket"),
         )
         results["stages"]["deliver"] = {
@@ -362,10 +363,13 @@ def run_pipeline(guid: str, body_text: str = None, load: bool = True) -> dict:
             "bucket": write_response.get("bucket"),
             "prefix": write_response.get("prefix"),
             "rows_written": write_response.get("rows_written"),
+            "files_written": write_response.get("files_written"),
             "documents_written": write_response.get("documents_written"),
+            "files": write_response.get("files"),
         }
         logger.info(
-            f"✓ Wrote {write_response.get('rows_written')} rows to "
+            f"✓ Wrote {write_response.get('rows_written')} rows across "
+            f"{write_response.get('files_written')} file(s) to "
             f"gs://{write_response.get('bucket')}/{write_response.get('prefix')}/"
         )
 
