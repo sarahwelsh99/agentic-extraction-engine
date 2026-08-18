@@ -231,6 +231,33 @@ def test_run_document_fans_out_one_agent_per_sheet():
     print("✓ test_run_document_fans_out_one_agent_per_sheet PASSED")
 
 
+def test_run_document_scores_pii_per_sheet_independently():
+    """Each sheet's PII flag is population_selection.selector.classify_text()
+    against that sheet's own raw text - independent of whether the sheet goes
+    on to pass, fail, or get rejected. classify_text is pure regex (no I/O),
+    so this calls it for real rather than faking it."""
+    body = ROW_SEPARATOR.join([
+        f"WithPII{SHEET_MARKER}",
+        "h1,h2",
+        "SSN: 123-45-6789,x",
+        f"NoPII{SHEET_MARKER}",
+        "h1,h2",
+        "just some ordinary text,y",
+    ])
+
+    states = asyncio.run(run_document(
+        "g", body, tools=_default_tools(), llm_session_factory=FakeSession,
+    ))
+
+    by_name = {s.sheet_name: s for s in states}
+    assert by_name["WithPII"].has_pii is True
+    assert by_name["WithPII"].pii_signals == "GOVERNMENT_ID"
+    assert by_name["NoPII"].has_pii is False
+    assert by_name["NoPII"].pii_score == 0
+
+    print("✓ test_run_document_scores_pii_per_sheet_independently PASSED")
+
+
 def test_run_document_sheets_run_concurrently():
     """The whole point of the async rewrite: N sheets' worth of (fake) LLM
     calls must overlap in wall time, not run one after another."""
@@ -264,6 +291,7 @@ def run_all_tests():
         test_generation_failure_is_retried_with_feedback,
         test_run_document_single_sheet_matches_a_direct_agent_call,
         test_run_document_fans_out_one_agent_per_sheet,
+        test_run_document_scores_pii_per_sheet_independently,
         test_run_document_sheets_run_concurrently,
     ]
     passed = failed = 0

@@ -36,6 +36,7 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 from tools import get_tool_by_name
 from extraction.metrics_recorder import record_pipeline_run
 from extraction.core.pipeline_agent import PipelineState, run_document
+from extraction.core.sheet_ledger import get_ledger
 
 
 def _require_tool(name: str):
@@ -233,16 +234,23 @@ def _stage_failed(state: PipelineState) -> Optional[str]:
 
 
 def _sheet_summary(state: PipelineState) -> Dict[str, Any]:
-    """The per-sheet breakdown surfaced in results["sheets"] - which sheet,
-    whether it passed, and if not, exactly where and why."""
+    """The per-sheet breakdown surfaced in results["sheets"] (and recorded
+    into the durable sheet ledger, see extraction/core/sheet_ledger.py) -
+    which sheet, whether it passed, if not exactly where and why (rejected
+    because it's not tabular vs. a genuine pipeline failure are distinguished
+    via rejection_code), and its own PII signal regardless of that outcome."""
     return {
         "sheet_name": state.sheet_name,
         "status": state.status,
+        "rejection_code": state.rejection_code,
         "stage_failed": _stage_failed(state),
         "failure_reason": (
             state.rejection_reason if state.status == "rejected" else state.failure_reason
         ),
         "rows_extracted": len(state.extracted_rows),
+        "has_pii": state.has_pii,
+        "pii_score": state.pii_score,
+        "pii_signals": state.pii_signals,
     }
 
 
@@ -288,6 +296,14 @@ def run_pipeline(guid: str, body_text: str = None, load: bool = True) -> dict:
         all_stage_entries.extend(state.stage_log)
     results["stages"] = {e["stage"]: e["response"] for e in all_stage_entries}
     results["sheets"] = [_sheet_summary(s) for s in states]
+
+    try:
+        get_ledger().record_sheets(guid, results["sheets"])
+    except Exception as e:
+        # The durable ledger is a record of what happened, not a gate on
+        # whether extraction can proceed - a write failure here must not
+        # sink an otherwise-successful run.
+        logger.error(f"Failed to record sheet ledger for {guid}: {e}")
 
     passing = [s for s in states if s.status == "success"]
 

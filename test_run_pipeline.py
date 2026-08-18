@@ -3,13 +3,23 @@
 run_document() (extraction/core/pipeline_agent.py) is faked here with a
 canned list of PipelineStates, so these pin the merge - row tagging with
 _sheet_name, results["sheets"], and "at least one sheet passed" success -
-not the agent loop or any real tool. record_pipeline_run is also faked: the
-real one appends to the git-tracked metrics.csv, which a test run must not
-touch.
+not the agent loop or any real tool. record_pipeline_run and the sheet
+ledger are also faked: the real ones write to the git-tracked metrics.csv
+and cache/sheet_ledger.db respectively, which a test run must not touch.
 """
 
 import run_pipeline as rp
 from extraction.core.pipeline_agent import PipelineState
+
+
+class FakeLedger:
+    """Stands in for SheetLedger; records each call for tests to inspect."""
+
+    def __init__(self):
+        self.calls = []
+
+    def record_sheets(self, guid, sheets, **kw):
+        self.calls.append((guid, sheets))
 
 
 def _state(sheet_name=None, status="success", rows=None, **kw):
@@ -18,22 +28,26 @@ def _state(sheet_name=None, status="success", rows=None, **kw):
     return s
 
 
-def _run_with(states, load=False):
-    """Run run_pipeline() with run_document() and metrics recording faked,
-    restoring both afterward regardless of outcome."""
+def _run_with(states, load=False, ledger=None):
+    """Run run_pipeline() with run_document(), metrics recording, and the
+    sheet ledger faked, restoring all three afterward regardless of outcome."""
     original_run_document = rp.run_document
     original_record = rp.record_pipeline_run
+    original_get_ledger = rp.get_ledger
 
     async def fake_run_document(guid, body_text, **kw):
         return states
 
+    fake_ledger = ledger if ledger is not None else FakeLedger()
     rp.run_document = fake_run_document
     rp.record_pipeline_run = lambda **kw: {"csv_path": "", "json_path": ""}
+    rp.get_ledger = lambda: fake_ledger
     try:
         return rp.run_pipeline("g", body_text="irrelevant", load=load)
     finally:
         rp.run_document = original_run_document
         rp.record_pipeline_run = original_record
+        rp.get_ledger = original_get_ledger
 
 
 def test_single_sheet_success_matches_the_original_shape():
@@ -46,8 +60,9 @@ def test_single_sheet_success_matches_the_original_shape():
     assert result["extracted_rows"] == [{"id": "1"}]
     assert len(result["sheets"]) == 1
     assert result["sheets"][0] == {
-        "sheet_name": None, "status": "success",
+        "sheet_name": None, "status": "success", "rejection_code": None,
         "stage_failed": None, "failure_reason": None, "rows_extracted": 1,
+        "has_pii": False, "pii_score": 0, "pii_signals": "",
     }
 
     print("✓ test_single_sheet_success_matches_the_original_shape PASSED")
@@ -105,12 +120,36 @@ def test_all_sheets_failed_surfaces_a_specific_reason():
     print("✓ test_all_sheets_failed_surfaces_a_specific_reason PASSED")
 
 
+def test_sheets_are_recorded_to_the_durable_ledger():
+    """Every run_pipeline() call records its sheets to the durable ledger -
+    the one call site both the CLI and run_corpus.py's _process_one go
+    through, so run_corpus.py itself needs no separate wiring."""
+    ledger = FakeLedger()
+    _run_with([
+        _state(sheet_name="A", status="success", rows=[{"id": "1"}], has_pii=True,
+              pii_score=2, pii_signals="DOB,ADDRESS"),
+        _state(sheet_name="B", status="rejected", rejection_code="NOT_TABULAR",
+              rejection_reason="prose, not a table"),
+    ], ledger=ledger)
+
+    assert len(ledger.calls) == 1
+    guid, sheets = ledger.calls[0]
+    assert guid == "g"
+    assert len(sheets) == 2
+    assert sheets[0]["has_pii"] is True
+    assert sheets[0]["pii_signals"] == "DOB,ADDRESS"
+    assert sheets[1]["rejection_code"] == "NOT_TABULAR"
+
+    print("✓ test_sheets_are_recorded_to_the_durable_ledger PASSED")
+
+
 def run_all_tests():
     tests = [
         test_single_sheet_success_matches_the_original_shape,
         test_multi_sheet_partial_success_tags_rows_and_reports_each_sheet,
         test_all_sheets_rejected_is_reported_as_rejected,
         test_all_sheets_failed_surfaces_a_specific_reason,
+        test_sheets_are_recorded_to_the_durable_ledger,
     ]
     passed = failed = 0
     for test in tests:
