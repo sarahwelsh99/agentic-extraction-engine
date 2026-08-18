@@ -46,7 +46,7 @@ from typing import Any, Dict, List, Optional
 from extraction.core import config
 from extraction.core.llm_service import get_llm_client, LLMSession
 from extraction.core.records import split_sheets
-from population_selection.selector import classify_text
+from extraction.core.sheet_pii import classify_sheet_text
 from tools import get_tool_by_name
 import json
 
@@ -86,7 +86,7 @@ class PipelineState:
     # (run_pipeline.py) can pull whatever fields its own metrics CSV wants
     # without this module needing to know their names.
     stage_log: List[Dict[str, Any]] = field(default_factory=list)
-    # Set by run_document() from population_selection.selector.classify_text()
+    # Set by run_document() from extraction.core.sheet_pii.classify_sheet_text()
     # against this sheet's own raw text - independent of whether the sheet
     # passed, failed, or was rejected, so a rejected (non-tabular, or empty)
     # sheet still gets a PII signal even though it never reaches Thinker/Tester.
@@ -360,7 +360,7 @@ async def run_document(
         # population_selection's own regex categories (and its "a bare name
         # alone isn't PII" nuance, inherited for free since there's no name
         # category to match) rather than a second, LLM-based judgment call.
-        pii = classify_text(block.body_text)
+        pii = classify_sheet_text(block.body_text)
         agent.state.has_pii = pii["has_pii"]
         agent.state.pii_score = pii["pii_score"]
         agent.state.pii_signals = pii["pii_signals"]
