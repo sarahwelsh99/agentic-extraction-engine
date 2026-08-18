@@ -143,55 +143,95 @@ class StructuralInspectorTool:
             JSON string with looker_spec, metadata_report, and rejection info
         """
         try:
-            guid = inputs.get("guid", "unknown")
-            raw_sample = inputs.get("raw_sample", "")
-            if not raw_sample:
-                return json.dumps({"status": "error", "error": "raw_sample is required"})
+            prepared = self._prepare(inputs)
+            if isinstance(prepared, str):
+                return prepared  # an error or rejection, already JSON-encoded
+            guid, lines, prompt = prepared
 
-            lines = [l for l in raw_sample.split("\n") if l.strip()]
-            if not lines:
-                return self._reject(guid, REJECT_NO_DATA, "Sample contained no records")
-
-            prompt = self._build_prompt(lines, inputs.get("sampled_record_indices"))
             reply = self._call_llm(prompt)
-            if reply is None:
-                return json.dumps({
-                    "status": "error", "guid": guid,
-                    "error": "Structural inspection failed: no response from the model",
-                })
-
-            try:
-                spec = json.loads(reply)
-            except json.JSONDecodeError as exc:
-                return json.dumps({
-                    "status": "error", "guid": guid,
-                    "error": f"Model reply was not valid JSON: {exc}",
-                })
-
-            if spec.get("layout_type") == "no_data":
-                return self._reject(guid, REJECT_NO_DATA, "Model found no data rows")
-            if spec.get("layout_type") == "prose_or_report":
-                return self._reject(
-                    guid, REJECT_NOT_TABULAR,
-                    "Model classified this as prose or a printed report, not a table",
-                )
-
-            report = self._to_metadata_report(spec, lines, inputs)
-
-            return json.dumps({
-                "status": "success",
-                "guid": guid,
-                "rejected": False,
-                "rejection_code": None,
-                "rejection_reason": None,
-                "looker_spec": spec,
-                "metadata_report": report,
-                "error": None,
-            }, indent=2)
+            return self._handle_reply(guid, reply, lines, inputs)
 
         except Exception as e:
             logger.error(f"Structural inspection error: {e}")
             return json.dumps({"status": "error", "error": str(e)})
+
+    async def acall(self, inputs: Dict[str, Any]) -> str:
+        """Async twin of __call__, for the per-sheet fan-out in
+        extraction/core/pipeline_agent.py. Same contract, same response
+        shape - only the LLM call itself runs on the event loop instead of
+        blocking a thread.
+        """
+        try:
+            prepared = self._prepare(inputs)
+            if isinstance(prepared, str):
+                return prepared
+            guid, lines, prompt = prepared
+
+            reply = await self._acall_llm(prompt)
+            return self._handle_reply(guid, reply, lines, inputs)
+
+        except Exception as e:
+            logger.error(f"Structural inspection error: {e}")
+            return json.dumps({"status": "error", "error": str(e)})
+
+    def _prepare(self, inputs: Dict[str, Any]):
+        """Validate input and build the prompt.
+
+        Returns:
+            (guid, lines, prompt) on success, or an already-JSON-encoded
+            error/rejection string - shared by __call__ and acall so neither
+            duplicates input validation or prompt building.
+        """
+        guid = inputs.get("guid", "unknown")
+        raw_sample = inputs.get("raw_sample", "")
+        if not raw_sample:
+            return json.dumps({"status": "error", "error": "raw_sample is required"})
+
+        lines = [l for l in raw_sample.split("\n") if l.strip()]
+        if not lines:
+            return self._reject(guid, REJECT_NO_DATA, "Sample contained no records")
+
+        prompt = self._build_prompt(lines, inputs.get("sampled_record_indices"))
+        return guid, lines, prompt
+
+    def _handle_reply(
+        self, guid: str, reply: Optional[str], lines: List[str], inputs: Dict[str, Any],
+    ) -> str:
+        """Turn the model's raw reply into this tool's response JSON."""
+        if reply is None:
+            return json.dumps({
+                "status": "error", "guid": guid,
+                "error": "Structural inspection failed: no response from the model",
+            })
+
+        try:
+            spec = json.loads(reply)
+        except json.JSONDecodeError as exc:
+            return json.dumps({
+                "status": "error", "guid": guid,
+                "error": f"Model reply was not valid JSON: {exc}",
+            })
+
+        if spec.get("layout_type") == "no_data":
+            return self._reject(guid, REJECT_NO_DATA, "Model found no data rows")
+        if spec.get("layout_type") == "prose_or_report":
+            return self._reject(
+                guid, REJECT_NOT_TABULAR,
+                "Model classified this as prose or a printed report, not a table",
+            )
+
+        report = self._to_metadata_report(spec, lines, inputs)
+
+        return json.dumps({
+            "status": "success",
+            "guid": guid,
+            "rejected": False,
+            "rejection_code": None,
+            "rejection_reason": None,
+            "looker_spec": spec,
+            "metadata_report": report,
+            "error": None,
+        }, indent=2)
 
     def _reject(self, guid: str, code: str, reason: str) -> str:
         logger.info(f"Rejected {guid}: {reason}")
@@ -257,6 +297,22 @@ DOCUMENT:
         for attempt in range(self.max_retries):
             try:
                 return self.client.chat(
+                    [{"role": "user", "content": prompt}],
+                    temperature=0.0,
+                    max_tokens=self.MAX_TOKENS,
+                    json_schema=RESPONSE_SCHEMA,
+                )
+            except (TimeoutError, RuntimeError) as e:
+                logger.warning(f"LLM call failed (attempt {attempt+1}/{self.max_retries}): {e}")
+                if attempt >= self.max_retries - 1:
+                    return None
+        return None
+
+    async def _acall_llm(self, prompt: str) -> Optional[str]:
+        """Async twin of _call_llm, via LocalLLMClient.achat()."""
+        for attempt in range(self.max_retries):
+            try:
+                return await self.client.achat(
                     [{"role": "user", "content": prompt}],
                     temperature=0.0,
                     max_tokens=self.MAX_TOKENS,

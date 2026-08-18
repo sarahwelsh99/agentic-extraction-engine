@@ -26,14 +26,26 @@ Delivery (Tool 6) is deliberately not a state here - a passing PipelineState
 is handed to the caller (run_pipeline.py), which loads it in a batch alongside
 other documents rather than one at a time (see write_parquet_to_gcs and
 run_corpus.py's per-bin batching).
+
+Sheets and concurrency: a workbook flattened into one body_text can carry
+several worksheets (extraction/core/records.py's split_sheets()), each with
+its own structure. run_document() below is the fan-out: it splits body_text
+into per-sheet blocks and runs one PipelineAgent per sheet *concurrently*,
+via real asyncio (httpx.AsyncClient for the LLM calls, asyncio.subprocess for
+the Docker sandbox) rather than threads - see structural_inspector,
+generate_parser_script, and sandbox_execute's own acall() methods. A
+single-sheet document (the common case) is just the len(sheets) == 1 case of
+the same code path, not a special case.
 """
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from extraction.core import config
 from extraction.core.llm_service import get_llm_client, LLMSession
+from extraction.core.records import split_sheets
 from tools import get_tool_by_name
 import json
 
@@ -55,6 +67,9 @@ class PipelineState:
 
     guid: str
     status: str = "running"  # running | success | failed | rejected
+    # None for an ordinary, single-table document; the worksheet's own name
+    # when this state came from run_document()'s per-sheet fan-out.
+    sheet_name: Optional[str] = None
     looker_spec: Optional[Dict[str, Any]] = None
     metadata_report: Dict[str, Any] = field(default_factory=dict)
     generated_code: Optional[Dict[str, Any]] = None
@@ -84,10 +99,15 @@ class PipelineAgent:
     ):
         """
         Args:
-            tools: optional override of {tool_name: callable}, for tests -
-                each callable takes an input dict and returns a JSON string,
-                same convention as every tool's __call__. Any name not given
-                falls back to the real, registered tool.
+            tools: optional override of {tool_name: callable}, for tests.
+                fetch_and_sample/evaluate_extraction callables are sync
+                (input dict -> JSON string, same as their __call__).
+                structural_inspector/generate_parser_script/sandbox_execute
+                callables are async (input dict -> awaitable of JSON
+                string, same as their acall()) - these three are the ones
+                that actually do I/O and run concurrently across a
+                document's sheets. Any name not given falls back to the
+                real, registered tool.
             llm_session: optional override, so tests need not reach vLLM.
         """
         self.guid = guid
@@ -95,11 +115,18 @@ class PipelineAgent:
         self.state = PipelineState(guid=guid)
 
         tools = tools or {}
+        # Sync: no I/O (fetch_and_sample given body_text directly) or pure
+        # computation (evaluate_extraction) - no async twin needed.
         self._tool1 = tools.get("fetch_and_sample") or _require_tool("fetch_and_sample")
-        self._tool2 = tools.get("structural_inspector") or _require_tool("structural_inspector")
-        self._tool3 = tools.get("generate_parser_script") or _require_tool("generate_parser_script")
-        self._tool4 = tools.get("sandbox_execute") or _require_tool("sandbox_execute")
         self._tool5 = tools.get("evaluate_extraction") or _require_tool("evaluate_extraction")
+        # Async: these do the real I/O (LLM calls, the Docker sandbox), and
+        # are what run_document()'s per-sheet fan-out actually parallelizes.
+        # Bound to .acall so PipelineAgent always calls a plain
+        # input-dict-in, coroutine-out callable regardless of whether it's a
+        # real tool or a test fake.
+        self._tool2 = tools.get("structural_inspector") or _require_tool("structural_inspector").acall
+        self._tool3 = tools.get("generate_parser_script") or _require_tool("generate_parser_script").acall
+        self._tool4 = tools.get("sandbox_execute") or _require_tool("sandbox_execute").acall
 
         # One conversation for this document's whole generate-validate-retry
         # loop: a retry is "fix this" against the code and failure Tool 3
@@ -108,24 +135,24 @@ class PipelineAgent:
         self._llm_session = llm_session if llm_session is not None else LLMSession(get_llm_client())
         self._tool1_response: Dict[str, Any] = {}
 
-    def run(self) -> PipelineState:
+    async def run(self) -> PipelineState:
         """Run the whole loop for this document. Always returns the final state."""
-        if not self._look():
+        if not await self._look():
             return self.state
 
         while self.state.retry_count < config.MAX_EXTRACTION_ATTEMPTS:
             self.state.retry_count += 1
 
-            if not self._think():
+            if not await self._think():
                 if self.state.status != "running":
                     return self.state
                 continue  # generation failed this attempt; retry with feedback
 
-            test_response = self._test()
+            test_response = await self._test()
             if test_response is None:
                 return self.state  # the tool call itself broke, not the script
 
-            if self._eval(test_response):
+            if await self._eval(test_response):
                 self.state.status = "success"
                 return self.state
             if self.state.status != "running" or not self.state.should_retry:
@@ -145,8 +172,10 @@ class PipelineAgent:
         })
 
     # ---------- Looker: fetch_and_sample (Micro-Slicer) + structural_inspector ----------
-    def _look(self) -> bool:
+    async def _look(self) -> bool:
         start = time.time()
+        # Sync: fetch_and_sample does no network I/O when given body_text
+        # directly, which is always how a per-sheet agent invokes it.
         response = json.loads(self._tool1({
             "guid": self.guid,
             "body_text": self.body_text,
@@ -160,7 +189,7 @@ class PipelineAgent:
         self._tool1_response = response
 
         start = time.time()
-        inspected = json.loads(self._tool2({
+        inspected = json.loads(await self._tool2({
             "guid": self.guid,
             "raw_sample": response["raw_sample"],
             "sampled_record_indices": response.get("sampled_record_indices"),
@@ -186,10 +215,10 @@ class PipelineAgent:
         return True
 
     # ---------- Thinker: generate_parser_script ----------
-    def _think(self) -> bool:
+    async def _think(self) -> bool:
         start = time.time()
         feedback = self.state.error_logs[-1] if self.state.error_logs else None
-        response = json.loads(self._tool3({
+        response = json.loads(await self._tool3({
             "guid": self.guid,
             "raw_sample": self._tool1_response.get("raw_sample"),
             "metadata_report": self.state.metadata_report,
@@ -221,9 +250,9 @@ class PipelineAgent:
         return True
 
     # ---------- Tester: sandbox_execute ----------
-    def _test(self) -> Optional[Dict[str, Any]]:
+    async def _test(self) -> Optional[Dict[str, Any]]:
         start = time.time()
-        response = json.loads(self._tool4({
+        response = json.loads(await self._tool4({
             "guid": self.guid,
             "generated_code": self.state.generated_code.get("code"),
             # The full document, not Tool 1's slice: the slice bounds the
@@ -235,7 +264,9 @@ class PipelineAgent:
         return response
 
     # ---------- Eval: evaluate_extraction ----------
-    def _eval(self, test_response: Dict[str, Any]) -> bool:
+    async def _eval(self, test_response: Dict[str, Any]) -> bool:
+        # No I/O here (pure comparison logic) - async only for a uniform
+        # calling convention in run(); nothing below actually awaits.
         start = time.time()
         response = json.loads(self._tool5({
             "guid": self.guid,
@@ -260,3 +291,50 @@ class PipelineAgent:
 
         self.state.error_logs.append(self.state.failure_reason or "extraction failed")
         return False
+
+
+async def run_document(
+    guid: str,
+    body_text: str,
+    tools: Optional[Dict[str, Any]] = None,
+    llm_session_factory: Optional[Any] = None,
+) -> List[PipelineState]:
+    """Detect worksheets and run each one through the agent loop concurrently.
+
+    A document with no SHEET_MARKER rows at all (the common case) is a
+    single sheet block with sheet_name=None - this always goes through the
+    same fan-out, never a special case, and returns a list of exactly one
+    PipelineState identical to calling PipelineAgent directly.
+
+    A multi-sheet document runs one PipelineAgent per sheet, each with its
+    own body_text scoped to that sheet alone, and each with its own
+    LLMSession (a session is one document/sheet's own retry conversation -
+    sharing one across concurrent sheets would interleave unrelated turns).
+    They run genuinely concurrently via asyncio.gather - the I/O each one
+    does (structural_inspector/generate_parser_script's LLM calls,
+    sandbox_execute's Docker container) is all async under the hood.
+
+    Args:
+        tools: passed through to every sheet's PipelineAgent - see its own
+            docstring for the sync/async split test doubles must follow.
+        llm_session_factory: called once per sheet to build that sheet's own
+            LLMSession - defaults to LLMSession(get_llm_client()). Tests pass
+            a fake session factory so no sheet touches the real vLLM
+            singleton.
+
+    Returns:
+        One PipelineState per sheet, in document order.
+    """
+    blocks = split_sheets(body_text)
+    session_factory = llm_session_factory or (lambda: LLMSession(get_llm_client()))
+
+    agents = []
+    for block in blocks:
+        agent = PipelineAgent(
+            guid, body_text=block.body_text, tools=tools,
+            llm_session=session_factory(),
+        )
+        agent.state.sheet_name = block.name
+        agents.append(agent)
+
+    return list(await asyncio.gather(*(agent.run() for agent in agents)))

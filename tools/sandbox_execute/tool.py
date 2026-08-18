@@ -11,6 +11,7 @@ Input: generated code from Tool 3, the document, the metadata report from Tool 2
 Output: extracted rows and execution counts
 """
 
+import asyncio
 import json
 import shutil
 import subprocess
@@ -57,46 +58,79 @@ class SandboxExecuteTool:
             JSON string with the extracted rows and execution counts
         """
         try:
-            guid = inputs.get("guid", "unknown")
-            generated_code = inputs.get("generated_code", "")
-            body_text = inputs.get("body_text", "")
-            metadata_report = inputs.get("metadata_report") or {}
-
-            if not generated_code:
-                return json.dumps({
-                    "status": "error",
-                    "error": "Missing generated_code",
-                })
-
-            if not body_text:
-                return json.dumps({
-                    "status": "error",
-                    "error": "Missing body_text",
-                })
+            prep = self._validate(inputs)
+            if isinstance(prep, str):
+                return prep
+            guid, generated_code, body_text, metadata_report = prep
 
             result = self._run_extraction(generated_code, body_text, metadata_report)
-
-            if result.get("status") == "error":
-                return json.dumps({
-                    "status": "error",
-                    "guid": guid,
-                    "error": result.get("error"),
-                })
-
-            return json.dumps({
-                "status": "success",
-                "guid": guid,
-                "extracted_rows": result.get("extracted_rows", []),
-                "total_rows": result.get("total_rows", 0),
-                "total_records": result.get("total_records", 0),
-                "skipped_wrong_shape": result.get("skipped_wrong_shape", 0),
-            }, indent=2)
+            return self._finalize(guid, result)
 
         except Exception as e:
             return json.dumps({
                 "status": "error",
                 "error": str(e),
             })
+
+    async def acall(self, inputs: Dict[str, Any]) -> str:
+        """Async twin of __call__, for the per-sheet fan-out in
+        extraction/core/pipeline_agent.py. Same job payload, same response
+        shape - the Docker container itself runs via
+        asyncio.create_subprocess_exec instead of subprocess.run, so it
+        doesn't block a thread while the sandbox runs.
+        """
+        try:
+            prep = self._validate(inputs)
+            if isinstance(prep, str):
+                return prep
+            guid, generated_code, body_text, metadata_report = prep
+
+            result = await self._arun_extraction(generated_code, body_text, metadata_report)
+            return self._finalize(guid, result)
+
+        except Exception as e:
+            return json.dumps({
+                "status": "error",
+                "error": str(e),
+            })
+
+    def _validate(self, inputs: Dict[str, Any]):
+        """Check required inputs.
+
+        Returns:
+            (guid, generated_code, body_text, metadata_report) on success, or
+            an already-JSON-encoded error string. Shared by __call__ and
+            acall so neither duplicates input validation.
+        """
+        guid = inputs.get("guid", "unknown")
+        generated_code = inputs.get("generated_code", "")
+        body_text = inputs.get("body_text", "")
+        metadata_report = inputs.get("metadata_report") or {}
+
+        if not generated_code:
+            return json.dumps({"status": "error", "error": "Missing generated_code"})
+        if not body_text:
+            return json.dumps({"status": "error", "error": "Missing body_text"})
+
+        return guid, generated_code, body_text, metadata_report
+
+    def _finalize(self, guid: str, result: Dict[str, Any]) -> str:
+        """Turn the sandbox's raw result dict into this tool's response JSON."""
+        if result.get("status") == "error":
+            return json.dumps({
+                "status": "error",
+                "guid": guid,
+                "error": result.get("error"),
+            })
+
+        return json.dumps({
+            "status": "success",
+            "guid": guid,
+            "extracted_rows": result.get("extracted_rows", []),
+            "total_rows": result.get("total_rows", 0),
+            "total_records": result.get("total_records", 0),
+            "skipped_wrong_shape": result.get("skipped_wrong_shape", 0),
+        }, indent=2)
 
     def _ensure_docker_image(self) -> None:
         """Build the image if it is missing or older than what goes into it.
@@ -164,6 +198,32 @@ class SandboxExecuteTool:
             if os.path.exists(path)
         )
 
+    @staticmethod
+    def _build_job(report: Dict[str, Any], body_text: str) -> str:
+        """The job payload sent to the sandbox over stdin. Pure/sync, shared
+        by _run_extraction and _arun_extraction."""
+        return json.dumps({
+            "body_text": body_text,
+            "delimiter": report.get("delimiter", ","),
+            # Detected by Tool 2; the default only applies when the document
+            # quotes nothing, in which case it cannot matter.
+            "quote_char": report.get("quote_char") or '"',
+            "header_row_index": report.get("header_row_index", 0),
+            # Rows narrower than the header are normal (trailing empties are
+            # trimmed); only rows too short to be this table are dropped.
+            "min_field_count": max(1, int(report.get("modal_field_count", 1) * 0.5)),
+            # Naming happens here, not in the generated code
+            "column_names": report.get("header_names") or [],
+            # And so does the width: the parser reads FIELD_COUNT rather than
+            # embedding a number, which is what lets one parser be cached and
+            # reused across documents of different widths.
+            "field_count": report.get("modal_field_count") or 0,
+            # From the Looker's structural_inspector: trailing rows (totals,
+            # page markers) that are not part of the table. 0 when there is
+            # no footer, so a report without one behaves exactly as before.
+            "skip_footer_lines": max(0, int(report.get("footer_start_from_bottom") or 0)),
+        })
+
     def _run_extraction(
         self,
         generated_code: str,
@@ -185,28 +245,7 @@ class SandboxExecuteTool:
             Dict with extraction results or error
         """
         report = metadata_report or {}
-
-        job = json.dumps({
-            "body_text": body_text,
-            "delimiter": report.get("delimiter", ","),
-            # Detected by Tool 2; the default only applies when the document
-            # quotes nothing, in which case it cannot matter.
-            "quote_char": report.get("quote_char") or '"',
-            "header_row_index": report.get("header_row_index", 0),
-            # Rows narrower than the header are normal (trailing empties are
-            # trimmed); only rows too short to be this table are dropped.
-            "min_field_count": max(1, int(report.get("modal_field_count", 1) * 0.5)),
-            # Naming happens here, not in the generated code
-            "column_names": report.get("header_names") or [],
-            # And so does the width: the parser reads FIELD_COUNT rather than
-            # embedding a number, which is what lets one parser be cached and
-            # reused across documents of different widths.
-            "field_count": report.get("modal_field_count") or 0,
-            # From the Looker's structural_inspector: trailing rows (totals,
-            # page markers) that are not part of the table. 0 when there is
-            # no footer, so a report without one behaves exactly as before.
-            "skip_footer_lines": max(0, int(report.get("footer_start_from_bottom") or 0)),
-        })
+        job = self._build_job(report, body_text)
 
         try:
             # Write code to temp file to avoid env var size limits
@@ -274,6 +313,84 @@ class SandboxExecuteTool:
                 "status": "error",
                 "error": "Invalid JSON output from extraction",
             }
+        except Exception as e:
+            return {
+                "status": "error",
+                "error": str(e),
+            }
+
+    async def _arun_extraction(
+        self,
+        generated_code: str,
+        body_text: str,
+        metadata_report: Dict[str, Any] = None,
+    ) -> Dict[str, Any]:
+        """Async twin of _run_extraction: the container runs via
+        asyncio.create_subprocess_exec instead of subprocess.run, so
+        launching it doesn't block a thread for the sandbox's lifetime.
+        Same job payload, same bounds, same result shape.
+        """
+        report = metadata_report or {}
+        job = self._build_job(report, body_text)
+
+        try:
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False) as f:
+                f.write(generated_code)
+                code_file = f.name
+            os.chmod(code_file, 0o644)
+
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "docker", "run",
+                    "--rm",
+                    "--network", "none",
+                    "--memory", self.MEMORY_LIMIT,
+                    "--cpus", self.CPU_LIMIT,
+                    "--pids-limit", str(self.PIDS_LIMIT),
+                    "--read-only",
+                    "--tmpfs", "/tmp:size=16m",
+                    "-v", f"{code_file}:/app/generated_code.py:ro",
+                    "-i",
+                    self.DOCKER_IMAGE,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+
+                try:
+                    stdout, stderr = await asyncio.wait_for(
+                        proc.communicate(input=job.encode()),
+                        timeout=self.FAST_PATH_TIMEOUT,
+                    )
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+                    return {"status": "error", "error": "Extraction timeout exceeded"}
+
+                if proc.returncode != 0:
+                    return {
+                        "status": "error",
+                        "error": (
+                            f"Docker execution failed (rc={proc.returncode}): "
+                            f"stderr={stderr.decode(errors='replace')} "
+                            f"stdout={stdout.decode(errors='replace')[:500]}"
+                        ),
+                    }
+
+                try:
+                    return json.loads(stdout)
+                except json.JSONDecodeError as e:
+                    return {
+                        "status": "error",
+                        "error": f"Invalid JSON from docker: {e}. stdout={stdout.decode(errors='replace')[:200]}",
+                    }
+
+            finally:
+                try:
+                    os.unlink(code_file)
+                except Exception:
+                    pass
+
         except Exception as e:
             return {
                 "status": "error",

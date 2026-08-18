@@ -112,8 +112,33 @@ class _Prefetcher(threading.Thread):
             self.out.put(None)
 
 
+def _sheet_detail(result: Dict) -> Optional[str]:
+    """A specific per-sheet failure detail, when a document has more than one
+    sheet and not every one of them passed - rather than one generic reason
+    rolled up across all of them.
+    """
+    sheets = result.get("sheets") or []
+    if len(sheets) <= 1:
+        return None
+    failing = [s for s in sheets if s.get("status") != "success"]
+    if not failing:
+        return None
+    parts = [
+        f"{s.get('sheet_name') or 'unnamed'} "
+        f"({s.get('status')}{': ' + s.get('stage_failed') if s.get('stage_failed') else ''}"
+        f"{': ' + s['failure_reason'] if s.get('failure_reason') else ''})"
+        for s in failing[:3]
+    ]
+    passed = len(sheets) - len(failing)
+    return f"{passed}/{len(sheets)} sheet(s) extracted; failed: " + ", ".join(parts)
+
+
 def _process_one(guid: str, body_text: str) -> Dict:
     """Run one document through Tools 1-5 and report what happened.
+
+    A multi-sheet document (extraction/core/records.py's split_sheets())
+    counts as "complete" if at least one sheet passed - see run_pipeline.py's
+    own docstring for the full partial-success semantics.
 
     Tool 6 is not called here: the caller loads the whole bin in one job.
     """
@@ -126,20 +151,31 @@ def _process_one(guid: str, body_text: str) -> Dict:
         return {
             "guid": guid,
             "outcome": STATUS_REJECTED,
-            "detail": result.get("rejection_reason") or result.get("rejection_code") or "rejected",
+            "detail": (
+                _sheet_detail(result)
+                or result.get("rejection_reason") or result.get("rejection_code") or "rejected"
+            ),
             "rows": [],
         }
     if not result.get("success"):
         return {
             "guid": guid,
             "outcome": STATUS_EXTRACTION,
-            "detail": result.get("failure_reason") or result.get("error") or "did not pass",
+            "detail": (
+                _sheet_detail(result)
+                or result.get("failure_reason") or result.get("error") or "did not pass"
+            ),
             "rows": [],
         }
+
+    detail = _sheet_detail(result)
+    if detail:
+        logger.info(f"{guid}: partial sheet success - {detail}")
+
     return {
         "guid": guid,
         "outcome": "complete",
-        "detail": None,
+        "detail": detail,
         "rows": result.get("extracted_rows") or [],
     }
 

@@ -21,10 +21,11 @@ extraction/
   core/
     config.py                env-driven configuration
     bigquery_service.py      status-table reads/writes (population, queue)
-    llm_service.py           LocalLLMClient + LLMSession (vLLM client)
-    pipeline_agent.py        the state machine: PipelineState + PipelineAgent
+    llm_service.py           LocalLLMClient + LLMSession (vLLM client, sync + async)
+    pipeline_agent.py        the state machine: PipelineState + PipelineAgent,
+                              run_document() (async per-sheet fan-out)
     workqueue.py             SQLite work queue, LPT bin-packing (from mosaic)
-    records.py               shared record/row dataclasses
+    records.py               shared record/row splitting + split_sheets()
   metrics_recorder.py         per-run metrics -> metrics.csv / metrics.json
   schema_code_cache.py         SQLite cache of generated parsers, keyed by schema hash
   pipeline_analyzer.py         validates Tools 1-4 output for the test harness
@@ -73,11 +74,35 @@ with an `LLMSession` shared across retries so a retry is a short follow-up
 turn against the code and failure already generated, not a rebuilt prompt
 (see `extraction/core/llm_service.py`). All of this state lives in one typed
 `PipelineState` (`looker_spec`, `metadata_report`, `error_logs`,
-`retry_count`, `extracted_rows`, ...) rather than loose local variables.
+`retry_count`, `extracted_rows`, `sheet_name`, ...) rather than loose local
+variables. `PipelineAgent` is async (`await agent.run()`) — see "Sheets and
+concurrency" below.
 
-`run_pipeline.run_pipeline(guid)` builds a `PipelineAgent`, runs it, and
-delivers a passing result with Tool 6 — it owns logging, metrics recording,
-and the CLI, not the state machine's control flow.
+### Sheets and concurrency
+
+A single glean document can flatten several worksheets into one `body_text`
+(a workbook with a tab per agent/region/etc.), each with its own header and
+structure. `extraction/core/records.py`'s `split_sheets()` detects this
+mechanically — the boundary (`SHEET_MARKER`-terminated rows) is unambiguous,
+no LLM judgment needed — and `pipeline_agent.run_document(guid, body_text)`
+fans out: one full `PipelineAgent` per sheet, each with its own body_text
+scoped to that sheet alone and its own `LLMSession`, run **concurrently** via
+real asyncio (`httpx.AsyncClient` for the LLM calls in `structural_inspector`
+and `generate_parser_script`, `asyncio.create_subprocess_exec` for
+`sandbox_execute`'s Docker sandbox — see each tool's `acall()` method,
+alongside its original sync `__call__`). A single-sheet document (the common
+case) is just the `len(sheets) == 1` case of the same code path.
+
+`run_pipeline.run_pipeline(guid)` calls `run_document()` (bridging into the
+event loop via `asyncio.run()` — everything above this point, including
+`run_corpus.py`'s own per-*document* concurrency via `ThreadPoolExecutor`,
+stays synchronous and untouched), then merges every sheet's result: rows
+from every *passing* sheet are combined (tagged `_sheet_name` when there was
+more than one sheet), and **partial success counts** — one guid is delivered
+and marked complete if at least one sheet passed, with the specific
+pass/fail/rejected outcome per sheet (and which step it failed at) reported
+under `results["sheets"]`. It owns logging, metrics recording, and the CLI,
+not the state machine's control flow.
 
 `run_corpus.py` drains the backlog: it reads the status table population
 selection populated (never `glean.drive_files` directly), bin-packs pending
@@ -109,12 +134,33 @@ response = json.loads(tool({"guid": "..."}))
 config (e.g. missing credentials) rather than raising, so it stays usable
 without a fully configured environment.
 
+`structural_inspector`, `generate_parser_script`, and `sandbox_execute` — the
+three that actually do I/O (an LLM call, or the Docker sandbox) — each also
+expose `async def acall(inputs) -> str`, alongside their original sync
+`__call__`, with the identical contract. `acall()` is what
+`pipeline_agent.py`'s per-sheet fan-out uses so a document's sheets run
+concurrently; nothing else calls it, and `__call__` still works exactly as
+it always has for any other caller. `fetch_and_sample` (no I/O once given
+`body_text`) and `evaluate_extraction` (pure comparison, no I/O at all) have
+no async twin — there's nothing to gain from one.
+
 ## Testing
 
-Each tool's tests live next to it (`tools/<name>/test_tool.py`), and the
-state machine's own tests live at `extraction/core/test_pipeline_agent.py`
-(every tool faked, pinning the retry/rejection transitions rather than vLLM
-or Docker behaviour) — both are pytest-discoverable. `test_tools_1_to_4.py`
-at the repo root is a separate, heavier harness that runs Tools 1-4 against
-real documents fetched from `glean` and validates output with
-`extraction/pipeline_analyzer.py` — see `docs/PIPELINE_OPERATIONS.md`.
+Each tool's tests live next to it (`tools/<name>/test_tool.py`, including an
+`asyncio.run(...)`-wrapped case for the async `acall()` path). The state
+machine's own tests live at `extraction/core/test_pipeline_agent.py` (every
+tool faked - sync for `fetch_and_sample`/`evaluate_extraction`, async for the
+rest - pinning retry/rejection transitions *and* the sheet fan-out, including
+a test that proves sheets actually run concurrently rather than sequentially).
+`extraction/core/test_records.py` covers `split_sheets()`/`has_multiple_sheets()`
+against the real multi-sheet shape found in production. `test_run_pipeline.py`
+at the repo root covers `run_pipeline.py`'s own merge logic (row tagging,
+partial-success semantics) with `run_document()` faked. All of the above are
+pytest-discoverable, and there's no `pytest-asyncio` dependency - async test
+bodies are plain functions that call `asyncio.run(...)` themselves, matching
+this repo's existing plain-function-test style.
+
+`test_tools_1_to_4.py` at the repo root is a separate, heavier harness that
+runs Tools 1-4 against real documents fetched from `glean` and validates
+output with `extraction/pipeline_analyzer.py` — see
+`docs/PIPELINE_OPERATIONS.md`.
