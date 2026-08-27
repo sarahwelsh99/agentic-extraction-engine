@@ -1,10 +1,21 @@
 """The pipeline as an explicit state machine: Looker -> Thinker -> Tester -> Eval.
 
-Looker runs once (fetch_and_sample's Micro-Slicer, then structural_inspector),
-then Thinker -> Tester -> Eval loop with feedback until Eval passes or the
-retry ceiling (config.MAX_EXTRACTION_ATTEMPTS) is reached:
+Two whole-document pre-Looker gates run once per document, before
+split_sheets() or any per-sheet work (see run_document() and
+extraction/core/document_type.py's module docstring): a zero-cost regex
+prefilter (reusing sheet_pii.classify_sheet_text's categories), then one
+cheap enum-constrained LLM call classifying the document's genre from its
+first 5,000 chars. Either can reject the whole document before Looker ever
+runs. Looker itself then runs once per sheet (fetch_and_sample's
+Micro-Slicer, then structural_inspector), followed by a Thinker -> Tester ->
+Eval loop with feedback until Eval passes or the retry ceiling
+(config.MAX_EXTRACTION_ATTEMPTS) is reached:
 
-    [Looker]  fetch_and_sample + structural_inspector, once
+    [Prefilter] regex, whole document, once
+        |
+    [Doc-type]  cheap LLM call, whole document, once
+        |
+    [Looker]  fetch_and_sample + structural_inspector, once per sheet
         |
     [Thinker] generate_parser_script  <---------------.
         |                                              |
@@ -44,11 +55,20 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from extraction.core import config
+from extraction.core.document_type import classify_document_type, SKIP_DOCUMENT_TYPES
 from extraction.core.llm_service import get_llm_client, LLMSession
 from extraction.core.records import split_sheets
 from extraction.core.sheet_pii import classify_sheet_text
 from tools import get_tool_by_name
 import json
+
+# Whole-document pre-Looker gates (extraction/core/document_type.py's module
+# docstring has the full rationale/incident history). Distinct from
+# structural_inspector's own REJECT_NO_DATA/REJECT_NOT_TABULAR - those fire
+# per-sheet, after split_sheets() and a real Tool 1/Tool 2 call; these fire
+# once per document, before either ever runs.
+REJECT_NO_PII_SIGNAL = "NO_PII_SIGNAL"
+REJECT_DOCUMENT_TYPE = "SKIPPED_DOCUMENT_TYPE"
 
 
 def _require_tool(name: str):
@@ -318,6 +338,7 @@ async def run_document(
     body_text: str,
     tools: Optional[Dict[str, Any]] = None,
     llm_session_factory: Optional[Any] = None,
+    document_type_classifier: Optional[Any] = None,
 ) -> List[PipelineState]:
     """Detect worksheets and run each one through the agent loop concurrently.
 
@@ -341,10 +362,53 @@ async def run_document(
             LLMSession - defaults to LLMSession(get_llm_client()). Tests pass
             a fake session factory so no sheet touches the real vLLM
             singleton.
+        document_type_classifier: async (client, body_text) -> Optional[str],
+            defaults to document_type.classify_document_type. Tests pass a
+            fake (e.g. one that always returns None) so the whole-document
+            pre-Looker gate below doesn't need a real vLLM singleton - unlike
+            the regex prefilter (pure, no I/O, always run for real), this one
+            makes an LLM call.
 
     Returns:
         One PipelineState per sheet, in document order.
     """
+    classify_doc_type = document_type_classifier or classify_document_type
+
+    if body_text:
+        # Pre-Looker gate 1: regex prefilter, whole document, zero LLM cost.
+        # A document with no notifiable-PII signal anywhere is rejected
+        # outright, before split_sheets() or any tool call - same shared
+        # categories run_document() already uses per-sheet below, just
+        # applied once to the whole document and actually gating instead of
+        # only recording.
+        prefilter = classify_sheet_text(body_text)
+        if not prefilter["has_pii"]:
+            state = PipelineState(
+                guid=guid, status="rejected",
+                rejection_code=REJECT_NO_PII_SIGNAL,
+                rejection_reason="No notifiable PII signal found in document",
+            )
+            return [state]
+
+        # Pre-Looker gate 2: one cheap LLM call classifying the document's
+        # form/genre from its first 5,000 chars - see
+        # extraction/core/document_type.py's module docstring for the
+        # SHEET_MARKER-explosion incident this exists to prevent. Only
+        # reached once gate 1 already confirmed a real PII signal, so a
+        # false-open here (classification failure) never costs more than the
+        # normal Looker path would anyway.
+        doc_type = await classify_doc_type(get_llm_client(), body_text)
+        if doc_type and doc_type in SKIP_DOCUMENT_TYPES:
+            state = PipelineState(
+                guid=guid, status="rejected",
+                rejection_code=REJECT_DOCUMENT_TYPE,
+                rejection_reason=f"Skipped: non-tabular document type ({doc_type})",
+                has_pii=prefilter["has_pii"],
+                pii_score=prefilter["pii_score"],
+                pii_signals=prefilter["pii_signals"],
+            )
+            return [state]
+
     blocks = split_sheets(body_text)
     session_factory = llm_session_factory or (lambda: LLMSession(get_llm_client()))
 

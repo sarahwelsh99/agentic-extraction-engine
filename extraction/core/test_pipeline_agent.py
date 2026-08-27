@@ -21,6 +21,14 @@ from extraction.core.pipeline_agent import PipelineAgent, run_document
 from extraction.core.records import SHEET_MARKER, ROW_SEPARATOR
 
 
+async def _no_skip_classifier(client, body_text):
+    """Fake document_type_classifier: always fails open (never skips),
+    matching classify_document_type's own None-on-failure contract, without
+    touching a real vLLM singleton - see run_document()'s own docstring for
+    why this is the one gate that needs an injection point."""
+    return None
+
+
 class FakeSession:
     """Stands in for LLMSession; PipelineAgent never inspects it directly."""
     messages = []
@@ -85,12 +93,22 @@ def _agent(guid="g", **tool_overrides):
 
 
 def _sheets_body(n: int) -> str:
-    """A synthetic flattened multi-sheet document with n worksheets."""
+    """A synthetic flattened multi-sheet document with n worksheets.
+
+    Sheet 0's data row carries a GOVERNMENT_ID-shaped SSN so the whole
+    document clears run_document()'s whole-document prefilter gate (which
+    looks at the whole body_text, not any one sheet) - without this, every
+    test using this fixture would get rejected at NO_PII_SIGNAL before ever
+    reaching a Looker call.
+    """
     parts = []
     for i in range(n):
         parts.append(f"Sheet{i}{SHEET_MARKER}")
         parts.append(f"h1,h2{SHEET_MARKER}")
-        parts.append(f"v{i}1,v{i}2")
+        row = f"v{i}1,v{i}2"
+        if i == 0:
+            row += ",SSN: 123-45-6789"
+        parts.append(row)
     return ROW_SEPARATOR.join(parts)
 
 
@@ -205,7 +223,8 @@ def test_run_document_single_sheet_matches_a_direct_agent_call():
     calling PipelineAgent directly."""
     tools = _default_tools()
     states = asyncio.run(run_document(
-        "g", "id,name\n1,a", tools=tools, llm_session_factory=FakeSession,
+        "g", "id,name,ssn\n1,a,123-45-6789", tools=tools,
+        llm_session_factory=FakeSession, document_type_classifier=_no_skip_classifier,
     ))
 
     assert len(states) == 1
@@ -222,6 +241,7 @@ def test_run_document_fans_out_one_agent_per_sheet():
     body = _sheets_body(3)
     states = asyncio.run(run_document(
         "g", body, tools=_default_tools(), llm_session_factory=FakeSession,
+        document_type_classifier=_no_skip_classifier,
     ))
 
     assert len(states) == 3
@@ -247,6 +267,7 @@ def test_run_document_scores_pii_per_sheet_independently():
 
     states = asyncio.run(run_document(
         "g", body, tools=_default_tools(), llm_session_factory=FakeSession,
+        document_type_classifier=_no_skip_classifier,
     ))
 
     by_name = {s.sheet_name: s for s in states}
@@ -267,7 +288,10 @@ def test_run_document_sheets_run_concurrently():
     tools = _default_tools(structural_inspector=_fake_async_tool(LOOK_OK, delay=delay))
 
     start = time.time()
-    states = asyncio.run(run_document("g", body, tools=tools, llm_session_factory=FakeSession))
+    states = asyncio.run(run_document(
+        "g", body, tools=tools, llm_session_factory=FakeSession,
+        document_type_classifier=_no_skip_classifier,
+    ))
     elapsed = time.time() - start
 
     assert len(states) == n
@@ -278,6 +302,66 @@ def test_run_document_sheets_run_concurrently():
     )
 
     print(f"✓ test_run_document_sheets_run_concurrently PASSED ({elapsed:.2f}s for {n} sheets)")
+
+
+def test_run_document_rejects_no_pii_signal_before_any_tool_call():
+    """A document with no notifiable-PII signal anywhere is rejected at the
+    whole-document prefilter gate, before split_sheets() or any tool call -
+    not even fetch_and_sample, let alone the Looker's LLM call."""
+    slicer = _fake_sync_tool(LOOK_OK)
+    states = asyncio.run(run_document(
+        "g", "just some ordinary text with no sensitive attributes",
+        tools=_default_tools(fetch_and_sample=slicer),
+        llm_session_factory=FakeSession, document_type_classifier=_no_skip_classifier,
+    ))
+
+    assert len(states) == 1
+    assert states[0].status == "rejected"
+    assert states[0].rejection_code == "NO_PII_SIGNAL"
+    assert slicer.calls["n"] == 0, "fetch_and_sample must never be called"
+
+    print("✓ test_run_document_rejects_no_pii_signal_before_any_tool_call PASSED")
+
+
+def test_run_document_rejects_skipped_document_type():
+    """A document that clears the PII prefilter but classifies into a
+    skip-listed genre is rejected before any Looker call, and the
+    classified type is threaded into the rejection reason."""
+    slicer = _fake_sync_tool(LOOK_OK)
+
+    async def classify_as_book(client, body_text):
+        return "published book or manual"
+
+    states = asyncio.run(run_document(
+        "g", "id,name,ssn\n1,a,123-45-6789",
+        tools=_default_tools(fetch_and_sample=slicer),
+        llm_session_factory=FakeSession, document_type_classifier=classify_as_book,
+    ))
+
+    assert len(states) == 1
+    assert states[0].status == "rejected"
+    assert states[0].rejection_code == "SKIPPED_DOCUMENT_TYPE"
+    assert "published book or manual" in states[0].rejection_reason
+    assert slicer.calls["n"] == 0, "fetch_and_sample must never be called"
+
+    print("✓ test_run_document_rejects_skipped_document_type PASSED")
+
+
+def test_run_document_never_skips_the_other_catchall():
+    """'other' is deliberately never in SKIP_DOCUMENT_TYPES - a document
+    classified 'other' must proceed to the Looker normally."""
+    async def classify_as_other(client, body_text):
+        return "other"
+
+    states = asyncio.run(run_document(
+        "g", "id,name,ssn\n1,a,123-45-6789", tools=_default_tools(),
+        llm_session_factory=FakeSession, document_type_classifier=classify_as_other,
+    ))
+
+    assert len(states) == 1
+    assert states[0].status == "success"
+
+    print("✓ test_run_document_never_skips_the_other_catchall PASSED")
 
 
 def run_all_tests():
@@ -293,6 +377,9 @@ def run_all_tests():
         test_run_document_fans_out_one_agent_per_sheet,
         test_run_document_scores_pii_per_sheet_independently,
         test_run_document_sheets_run_concurrently,
+        test_run_document_rejects_no_pii_signal_before_any_tool_call,
+        test_run_document_rejects_skipped_document_type,
+        test_run_document_never_skips_the_other_catchall,
     ]
     passed = failed = 0
     for test in tests:

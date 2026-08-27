@@ -78,6 +78,20 @@ turn against the code and failure already generated, not a rebuilt prompt
 variables. `PipelineAgent` is async (`await agent.run()`) — see "Sheets and
 concurrency" below.
 
+### Pre-Looker gates
+
+Before `split_sheets()` or any Looker call, `run_document()` runs two
+whole-document checks, each able to reject the document outright with zero
+tool calls: a zero-cost regex prefilter (`extraction/core/sheet_pii.py`'s
+`classify_sheet_text()`, the same categories `population_selection/`
+scores at ingestion, but now actually gating rather than only recorded), then
+one cheap enum-constrained LLM call (`extraction/core/document_type.py`)
+classifying the document's genre from its first 5,000 chars — ported from
+mosaic-glean-extraction's document-type skip check. See that module's
+docstring for the SHEET_MARKER-fan-out incident (a flattened PDF book
+exploding into thousands of fake "sheets") this exists to catch before it
+reaches the Looker at all.
+
 ### Sheets and concurrency
 
 A single glean document can flatten several worksheets into one `body_text`
@@ -151,7 +165,10 @@ Each tool's tests live next to it (`tools/<name>/test_tool.py`, including an
 machine's own tests live at `extraction/core/test_pipeline_agent.py` (every
 tool faked - sync for `fetch_and_sample`/`evaluate_extraction`, async for the
 rest - pinning retry/rejection transitions *and* the sheet fan-out, including
-a test that proves sheets actually run concurrently rather than sequentially).
+a test that proves sheets actually run concurrently rather than sequentially,
+plus the two pre-Looker gates' rejection paths). The document-type
+classifier itself has its own tests at
+`extraction/core/test_document_type.py`.
 `extraction/core/test_records.py` covers `split_sheets()`/`has_multiple_sheets()`
 against the real multi-sheet shape found in production. `test_run_pipeline.py`
 at the repo root covers `run_pipeline.py`'s own merge logic (row tagging,
