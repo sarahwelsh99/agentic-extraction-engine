@@ -27,8 +27,10 @@ data_anomalies (has_multiline_rows, contains_inline_summaries) are reported
 but nothing downstream acts on them yet - see docs/ARCHITECTURE.md.
 """
 
+import asyncio
 import json
 import logging
+import time
 from collections import Counter
 from typing import Any, Dict, List, Optional
 
@@ -177,6 +179,22 @@ class StructuralInspectorTool:
             logger.error(f"Structural inspection error: {e}")
             return json.dumps({"status": "error", "error": str(e)})
 
+    def _build_response(self, guid: str, spec: Dict[str, Any], lines: List[str],
+                        inputs: Dict[str, Any]) -> str:
+        """The success response shape, shared by a fresh LLM reply and a
+        verified cache hit."""
+        report = self._to_metadata_report(spec, lines, inputs)
+        return json.dumps({
+            "status": "success",
+            "guid": guid,
+            "rejected": False,
+            "rejection_code": None,
+            "rejection_reason": None,
+            "looker_spec": spec,
+            "metadata_report": report,
+            "error": None,
+        }, indent=2)
+
     def _prepare(self, inputs: Dict[str, Any]):
         """Validate input and build the prompt.
 
@@ -223,18 +241,7 @@ class StructuralInspectorTool:
                 "Model classified this as prose or a printed report, not a table",
             )
 
-        report = self._to_metadata_report(spec, lines, inputs)
-
-        return json.dumps({
-            "status": "success",
-            "guid": guid,
-            "rejected": False,
-            "rejection_code": None,
-            "rejection_reason": None,
-            "looker_spec": spec,
-            "metadata_report": report,
-            "error": None,
-        }, indent=2)
+        return self._build_response(guid, spec, lines, inputs)
 
     def _reject(self, guid: str, code: str, reason: str) -> str:
         logger.info(f"Rejected {guid}: {reason}")
@@ -297,6 +304,11 @@ DOCUMENT:
 """
 
     @staticmethod
+    def _retry_delay(attempt: int) -> float:
+        backoff = config.VLLM_RETRY_BACKOFF_SEC
+        return backoff[min(attempt, len(backoff) - 1)]
+
+    @staticmethod
     def _is_valid_json(text: Optional[str]) -> bool:
         if not text:
             return False
@@ -325,6 +337,7 @@ DOCUMENT:
                 logger.warning(f"LLM call failed (attempt {attempt+1}/{self.max_retries}): {e}")
                 if attempt >= self.max_retries - 1:
                     return last_reply
+                time.sleep(self._retry_delay(attempt))
                 continue
 
             last_reply = reply
@@ -350,6 +363,7 @@ DOCUMENT:
                 logger.warning(f"LLM call failed (attempt {attempt+1}/{self.max_retries}): {e}")
                 if attempt >= self.max_retries - 1:
                     return last_reply
+                await asyncio.sleep(self._retry_delay(attempt))
                 continue
 
             last_reply = reply

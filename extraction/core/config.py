@@ -28,6 +28,16 @@ VLLM_MODEL = os.getenv("VLLM_MODEL", "QuantTrio/Qwen3-Coder-30B-A3B-Instruct-GPT
 VLLM_TIMEOUT = int(os.getenv("VLLM_TIMEOUT", "300"))
 VLLM_MAX_RETRIES = int(os.getenv("VLLM_MAX_RETRIES", "3"))
 
+# Backoff between retry attempts on a transient LLM call failure (timeout,
+# connection error) - same shape as bigquery_service.RETRY_BACKOFF_SEC. Every
+# vLLM retry loop used to fire the next attempt immediately (no sleep), which
+# is fine against a healthy server but, under real concurrent load (many
+# sheets timing out together because vLLM's queue is saturated), just
+# re-adds the same request pressure back on top of the backlog instead of
+# giving it room to drain - measured need after the 2026-08-18 run where this
+# fed a timeout storm (162k+ timeouts, zero bins completed).
+VLLM_RETRY_BACKOFF_SEC = (2, 5, 10)
+
 # ===== Pipeline Agent (Looker -> Thinker -> Tester -> Eval) =====
 # Attempts at generating a working script, including the first. The single
 # source of truth for the retry ceiling: extraction/core/pipeline_agent.py and

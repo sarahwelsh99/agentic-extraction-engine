@@ -9,6 +9,7 @@ Output: Python class exposing DataExtractor.parse_row
 """
 
 import ast
+import asyncio
 import json
 import re
 import httpx
@@ -34,6 +35,11 @@ class GenerateParserScriptTool:
         self.vllm_model = config.VLLM_MODEL
         self.timeout = config.VLLM_TIMEOUT
         self.max_retries = config.VLLM_MAX_RETRIES
+
+    @staticmethod
+    def _retry_delay(attempt: int) -> float:
+        backoff = config.VLLM_RETRY_BACKOFF_SEC
+        return backoff[min(attempt, len(backoff) - 1)]
 
     def __call__(self, inputs: Dict[str, Any]) -> str:
         """Generate parser script from schema using vLLM or cache.
@@ -297,6 +303,7 @@ class GenerateParserScriptTool:
                 logger.error(f"LLM session error (attempt {attempt+1}/{self.max_retries}): {e}")
                 if attempt >= self.max_retries - 1:
                     raise
+                time.sleep(self._retry_delay(attempt))
                 continue
             code = self._extract_code(text)
             if code:
@@ -331,6 +338,7 @@ class GenerateParserScriptTool:
                 logger.error(f"LLM session error (attempt {attempt+1}/{self.max_retries}): {e}")
                 if attempt >= self.max_retries - 1:
                     raise
+                await asyncio.sleep(self._retry_delay(attempt))
                 continue
             code = self._extract_code(text)
             if code:
@@ -494,6 +502,7 @@ CODE:
 
                 except requests.exceptions.Timeout:
                     if attempt < self.max_retries - 1:
+                        time.sleep(self._retry_delay(attempt))
                         continue
                     raise
                 except requests.exceptions.RequestException as e:
@@ -502,6 +511,7 @@ CODE:
                         logger.error(f"  Response status: {e.response.status_code}")
                         logger.error(f"  Response text: {e.response.text[:500]}")
                     if attempt < self.max_retries - 1:
+                        time.sleep(self._retry_delay(attempt))
                         continue
                     raise
 
@@ -544,11 +554,13 @@ CODE:
 
                     except httpx.TimeoutException:
                         if attempt < self.max_retries - 1:
+                            await asyncio.sleep(self._retry_delay(attempt))
                             continue
                         raise
                     except httpx.HTTPError as e:
                         logger.error(f"vLLM request error (attempt {attempt+1}/{self.max_retries}): {e}")
                         if attempt < self.max_retries - 1:
+                            await asyncio.sleep(self._retry_delay(attempt))
                             continue
                         raise
 
