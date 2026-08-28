@@ -255,6 +255,21 @@ def _commit_bin(client, status_table_id: str, bin_id: int,
         )
         logger.warning(f"Bin {bin_id}: parked {len(failed)} document(s) as error_{outcome}")
 
+    # A bin that extracts nothing at all is never routine. One earlier run put a
+    # full bin of 499 documents through in 23 minutes and produced zero rows,
+    # because a method the sandbox needed had been deleted; every document
+    # recorded an ordinary-looking extraction failure and nothing objected.
+    # Rejections alone can legitimately empty a bin, so this reports loudly
+    # rather than halting -- but it names where the cause is written down.
+    if not passing and results:
+        reasons = {r.get("detail") for r in results if r["outcome"] != "complete"}
+        logger.error(
+            f"Bin {bin_id}: {len(results)} document(s) produced ZERO rows. "
+            f"That is not normal. Distinct failure reasons: "
+            f"{sorted(str(x)[:120] for x in reasons if x) or 'none recorded'}. "
+            f"Check cache/sheet_ledger.db failure_reason before letting this continue."
+        )
+
     return len(passing) + len(empty), rows_loaded
 
 

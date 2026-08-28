@@ -157,7 +157,8 @@ def mark_agentic_complete(client: bigquery.Client, guids: List[str]) -> int:
 AGENTIC_TABLE_ID = f"{config.PROJECT_ID}.{config.DATASET_ID}.{config.SOURCE_TABLE_NAME}"
 
 
-def mark_own_status(client: bigquery.Client, guids: List[str], status: str) -> int:
+def mark_own_status(client: bigquery.Client, guids: List[str], status: str,
+                    detail: Optional[str] = None) -> int:
     """Record the same outcome in our own status table, per bin.
 
     This run drains mosaic's structured_pending, so the marks above go to
@@ -173,6 +174,12 @@ def mark_own_status(client: bigquery.Client, guids: List[str], status: str) -> i
     pii_signals and pii_detection_method still carry it, so "what did we extract
     from the PII-relevant population" stays answerable from those columns rather
     than from status.
+
+    `detail` carries why a document failed. Without it this table records that
+    198 documents failed and nothing about the cause, and answering "why" means
+    going to the sheet ledger -- a SQLite file on whichever machine happened to
+    run the drain. A whole bin once failed on a missing method, and the status
+    table was unable to say so.
     """
     if not guids:
         return 0
@@ -180,6 +187,7 @@ def mark_own_status(client: bigquery.Client, guids: List[str], status: str) -> i
         f"""
         UPDATE `{AGENTIC_TABLE_ID}`
         SET status = @status,
+            error_message = @detail,
             extraction_version = 'agentic-v1',
             extracted_at = CURRENT_TIMESTAMP()
         WHERE guid IN UNNEST(@guids)
@@ -187,6 +195,10 @@ def mark_own_status(client: bigquery.Client, guids: List[str], status: str) -> i
         job_config=bigquery.QueryJobConfig(query_parameters=[
             bigquery.ArrayQueryParameter("guids", "STRING", guids),
             bigquery.ScalarQueryParameter("status", "STRING", status),
+            # Cleared on success, so a document that failed and later succeeded
+            # does not keep its old reason.
+            bigquery.ScalarQueryParameter("detail", "STRING",
+                                          (detail or None) and detail[:8192]),
         ]),
     )
     job.result()
@@ -334,10 +346,30 @@ def _commit_bin(client: bigquery.Client, bin_id: int, results: List[dict]) -> Tu
         bigquery_service.retry_bq(
             f"mark_own_status error_{outcome} (bin {bin_id}, {len(failed)} guid(s))",
             lambda o=outcome, f=failed: mark_own_status(
-                client, [r["guid"] for r in f], f"error_{o}"),
+                client, [r["guid"] for r in f], f"error_{o}",
+                # One reason for the group: they share a bin and an outcome, and
+                # per-document detail is what the sheet ledger is for.
+                f"{len(f)} document(s) in bin {bin_id}; first: "
+                f"{f[0].get('detail') or o}"),
         )
         logger.warning(f"Bin {bin_id}: marked {len(failed)} document(s) as "
                        f"{_agentic_error_status(outcome)}")
+
+    # A bin that extracts nothing at all is never routine. Bin 0 of an earlier
+    # run put 499 documents through in 23 minutes and produced zero rows,
+    # because a method the sandbox needed had been deleted; every document
+    # recorded an ordinary-looking extraction failure and the run would have
+    # continued producing nothing indefinitely. Rejections alone can legitimately
+    # empty a bin, so this reports loudly rather than halting -- but it names the
+    # place the cause is actually written down.
+    if not passing and results:
+        reasons = {r.get("detail") for r in results if r["outcome"] != "complete"}
+        logger.error(
+            f"Bin {bin_id}: {len(results)} document(s) produced ZERO rows. "
+            f"That is not normal. Distinct failure reasons: "
+            f"{sorted(str(x)[:120] for x in reasons if x) or 'none recorded'}. "
+            f"Check cache/sheet_ledger.db failure_reason before letting this continue."
+        )
 
     return len(passing) + len(empty), rows_loaded
 
