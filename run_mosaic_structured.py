@@ -301,6 +301,29 @@ def _build_or_resume(client: bigquery.Client, statuses: List[str], min_body_leng
     return wq
 
 
+def _mark(what: str, fn) -> bool:
+    """Run a status update, surviving a failure to apply it.
+
+    A lost status mark used to kill the whole drain. It should not: the bin's
+    Parquet is already written by this point, so the only consequence of an
+    unapplied mark is that those guids still look pending and get reprocessed
+    later -- which overwrites the same files at the same paths and costs time,
+    not correctness. Stopping an eight-hour drain because one UPDATE lost a
+    serialization race to another writer on a shared table is the worse trade.
+
+    Logged at ERROR because the drift it leaves is real and someone has to
+    notice it; scripts/align_status_tables.py is what closes it.
+    """
+    try:
+        bigquery_service.retry_bq(what, fn)
+        return True
+    except Exception as e:
+        logger.error(f"{what} could not be applied: {e}. "
+                     f"Those guids stay pending and will be reprocessed; "
+                     f"run scripts/align_status_tables.py to reconcile.")
+        return False
+
+
 def _commit_bin(client: bigquery.Client, bin_id: int, results: List[dict]) -> Tuple[int, int]:
     from tools import get_tool_by_name
     import json
@@ -322,36 +345,28 @@ def _commit_bin(client: bigquery.Client, bin_id: int, results: List[dict]) -> Tu
 
     done = [r["guid"] for r in passing] + [r["guid"] for r in empty]
     if done:
-        bigquery_service.retry_bq(
-            f"mark_agentic_complete (bin {bin_id}, {len(done)} guid(s))",
-            lambda: mark_agentic_complete(client, done),
-        )
-        ours = bigquery_service.retry_bq(
-            f"mark_own_status complete (bin {bin_id}, {len(done)} guid(s))",
-            lambda: mark_own_status(client, done, "complete"),
-        )
-        if ours:
-            logger.info(f"Bin {bin_id}: {ours} of these were pending in "
-                        f"{config.SOURCE_TABLE_NAME}; marked complete")
+        _mark(f"mark_agentic_complete (bin {bin_id}, {len(done)} guid(s))",
+              lambda: mark_agentic_complete(client, done))
+        if _mark(f"mark_own_status complete (bin {bin_id}, {len(done)} guid(s))",
+                 lambda: mark_own_status(client, done, "complete")):
+            logger.info(f"Bin {bin_id}: {len(done)} document(s) marked complete "
+                        f"in {config.SOURCE_TABLE_NAME}")
 
     for outcome in (STATUS_REJECTED, STATUS_EXTRACTION, STATUS_PIPELINE):
         failed = [r for r in results if r["outcome"] == outcome]
         if not failed:
             continue
-        bigquery_service.retry_bq(
-            f"mark_agentic_error {outcome} (bin {bin_id}, {len(failed)} guid(s))",
-            lambda o=outcome, f=failed: mark_agentic_error(
-                client, [r["guid"] for r in f], o),
-        )
-        bigquery_service.retry_bq(
+        _mark(f"mark_agentic_error {outcome} (bin {bin_id}, {len(failed)} guid(s))",
+              lambda o=outcome, f=failed: mark_agentic_error(
+                  client, [r["guid"] for r in f], o))
+        _mark(
             f"mark_own_status error_{outcome} (bin {bin_id}, {len(failed)} guid(s))",
             lambda o=outcome, f=failed: mark_own_status(
                 client, [r["guid"] for r in f], f"error_{o}",
                 # One reason for the group: they share a bin and an outcome, and
                 # per-document detail is what the sheet ledger is for.
                 f"{len(f)} document(s) in bin {bin_id}; first: "
-                f"{f[0].get('detail') or o}"),
-        )
+                f"{f[0].get('detail') or o}"))
         logger.warning(f"Bin {bin_id}: marked {len(failed)} document(s) as "
                        f"{_agentic_error_status(outcome)}")
 

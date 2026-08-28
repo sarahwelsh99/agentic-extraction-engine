@@ -290,12 +290,12 @@ def mark_status_error(
 
 
 # Retry shape taken from mosaic-glean-extraction's bigquery_service.py.
-# Four attempts at fixed 5s/20s/60s steps, no jitter: these wrap whole-query
+# Six attempts at fixed 5s/20s/60s/120s/300s steps, no jitter: these wrap whole-query
 # units (a metadata stream, a bin's body fetch), so a retry re-issues the query
 # from scratch and the cost of an early retry is high enough that backing off
 # hard beats backing off often.
-RETRY_ATTEMPTS = 4
-RETRY_BACKOFF_SEC = (5, 20, 60)
+RETRY_ATTEMPTS = 6
+RETRY_BACKOFF_SEC = (5, 20, 60, 120, 300)
 
 # Errors that mean the request itself is wrong, so repeating it cannot help.
 PERMANENT_ERRORS = (
@@ -307,7 +307,8 @@ PERMANENT_ERRORS = (
 # BadRequest even though both clear on their own: a table's streaming buffer
 # blocks DML for a few minutes after a load, and concurrent DML against one
 # table surfaces as a serialization complaint rather than a rate limit.
-TRANSIENT_MESSAGE_HINTS = ("streaming buffer", "concurrent update")
+TRANSIENT_MESSAGE_HINTS = ("streaming buffer", "concurrent update",
+                           "could not serialize access")
 
 
 def retry_bq(what: str, fn, max_retries: int = RETRY_ATTEMPTS):
