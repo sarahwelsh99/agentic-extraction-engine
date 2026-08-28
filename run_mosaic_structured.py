@@ -154,6 +154,45 @@ def mark_agentic_complete(client: bigquery.Client, guids: List[str]) -> int:
     return job.num_dml_affected_rows or 0
 
 
+AGENTIC_TABLE_ID = f"{config.PROJECT_ID}.{config.DATASET_ID}.{config.SOURCE_TABLE_NAME}"
+
+
+def mark_own_status(client: bigquery.Client, guids: List[str], status: str) -> int:
+    """Record the same outcome in our own status table, per bin.
+
+    This run drains mosaic's structured_pending, so the marks above go to
+    mosaic's table. Our status table tracks a different population that
+    overlaps it, and without this it never learns that a guid it also lists
+    has already been done -- which is what left 127k documents sitting in
+    'pending' after a quarter of a million had been processed.
+
+    Deliberately not scoped to rows still 'pending'. The two tables are meant to
+    agree about what has been extracted, so a guid this run processed is marked
+    here whatever our selector had previously decided about it -- including one
+    it had ruled out as 'excluded_no_pii'. That verdict is not lost: pii_score,
+    pii_signals and pii_detection_method still carry it, so "what did we extract
+    from the PII-relevant population" stays answerable from those columns rather
+    than from status.
+    """
+    if not guids:
+        return 0
+    job = client.query(
+        f"""
+        UPDATE `{AGENTIC_TABLE_ID}`
+        SET status = @status,
+            extraction_version = 'agentic-v1',
+            extracted_at = CURRENT_TIMESTAMP()
+        WHERE guid IN UNNEST(@guids)
+        """,
+        job_config=bigquery.QueryJobConfig(query_parameters=[
+            bigquery.ArrayQueryParameter("guids", "STRING", guids),
+            bigquery.ScalarQueryParameter("status", "STRING", status),
+        ]),
+    )
+    job.result()
+    return job.num_dml_affected_rows or 0
+
+
 def mark_agentic_error(client: bigquery.Client, guids: List[str], outcome: str) -> int:
     if not guids:
         return 0
@@ -275,6 +314,13 @@ def _commit_bin(client: bigquery.Client, bin_id: int, results: List[dict]) -> Tu
             f"mark_agentic_complete (bin {bin_id}, {len(done)} guid(s))",
             lambda: mark_agentic_complete(client, done),
         )
+        ours = bigquery_service.retry_bq(
+            f"mark_own_status complete (bin {bin_id}, {len(done)} guid(s))",
+            lambda: mark_own_status(client, done, "complete"),
+        )
+        if ours:
+            logger.info(f"Bin {bin_id}: {ours} of these were pending in "
+                        f"{config.SOURCE_TABLE_NAME}; marked complete")
 
     for outcome in (STATUS_REJECTED, STATUS_EXTRACTION, STATUS_PIPELINE):
         failed = [r for r in results if r["outcome"] == outcome]
@@ -284,6 +330,11 @@ def _commit_bin(client: bigquery.Client, bin_id: int, results: List[dict]) -> Tu
             f"mark_agentic_error {outcome} (bin {bin_id}, {len(failed)} guid(s))",
             lambda o=outcome, f=failed: mark_agentic_error(
                 client, [r["guid"] for r in f], o),
+        )
+        bigquery_service.retry_bq(
+            f"mark_own_status error_{outcome} (bin {bin_id}, {len(failed)} guid(s))",
+            lambda o=outcome, f=failed: mark_own_status(
+                client, [r["guid"] for r in f], f"error_{o}"),
         )
         logger.warning(f"Bin {bin_id}: marked {len(failed)} document(s) as "
                        f"{_agentic_error_status(outcome)}")

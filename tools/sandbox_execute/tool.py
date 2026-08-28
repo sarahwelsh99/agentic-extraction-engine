@@ -12,6 +12,8 @@ Output: extracted rows and execution counts
 """
 
 import asyncio
+import filecmp
+import hashlib
 import json
 import shutil
 import subprocess
@@ -151,78 +153,77 @@ class SandboxExecuteTool:
                 "extraction", "core", "records.py",
             )
 
-            # Refresh the shared splitter into the build context unconditionally.
-            # Docker cannot COPY from outside the context, and a stale copy here
-            # means the sandbox splits rows differently from the profiling tools.
-            shutil.copyfile(shared_records, os.path.join(build_dir, "records.py"))
+            # Refresh the shared splitter into the build context, but only when
+            # the content actually differs. Docker cannot COPY from outside the
+            # context, and a stale copy here means the sandbox splits rows
+            # differently from the profiling tools -- but copyfile rewrites the
+            # destination's mtime every time, and _image_is_stale compares
+            # mtimes, so copying unconditionally makes the image look stale on
+            # every construction and rebuilds it on every document.
+            local_records = os.path.join(build_dir, "records.py")
+            if not (os.path.exists(local_records)
+                    and filecmp.cmp(shared_records, local_records, shallow=False)):
+                shutil.copyfile(shared_records, local_records)
 
             if not self._image_is_stale(build_dir, dockerfile_path):
                 return
 
-            subprocess.run(
+            built = subprocess.run(
                 ["docker", "build", "-t", self.DOCKER_IMAGE, "-f", dockerfile_path, "."],
                 cwd=build_dir,
                 capture_output=True,
                 timeout=300,
             )
+            if built.returncode != 0:
+                print(f"Warning: docker build failed: "
+                      f"{built.stderr.decode(errors='replace')[-500:]}")
+                return
+            # Only stamp a build that succeeded, so a failed one is retried
+            # rather than remembered as current.
+            with open(os.path.join(build_dir, self.STAMP_FILE), "w") as handle:
+                handle.write(self._source_fingerprint(build_dir, dockerfile_path))
         except Exception as e:
             print(f"Warning: Could not ensure Docker image: {e}")
 
+    # Written next to the Dockerfile after a successful build, holding the
+    # fingerprint of what went into that build.
+    STAMP_FILE = ".image_stamp"
+
+    def _source_fingerprint(self, build_dir: str, dockerfile_path: str) -> str:
+        """Hash of everything the image is built from."""
+        digest = hashlib.sha256()
+        for path in (dockerfile_path,
+                     os.path.join(build_dir, "run_extraction.py"),
+                     os.path.join(build_dir, "records.py")):
+            digest.update(os.path.basename(path).encode())
+            if os.path.exists(path):
+                with open(path, "rb") as handle:
+                    digest.update(handle.read())
+        return digest.hexdigest()
+
     def _image_is_stale(self, build_dir: str, dockerfile_path: str) -> bool:
-        """Whether the image is missing, or predates the files it contains."""
-        created = subprocess.run(
-            ["docker", "image", "inspect", "-f", "{{.Created}}", self.DOCKER_IMAGE],
-            capture_output=True,
-            text=True,
-            timeout=10,
+        """Whether the image is missing, or was built from different sources.
+
+        Compares a content fingerprint rather than modification times. Times do
+        not work here: Docker's layer cache means a rebuild whose layers all hit
+        leaves the image's Created timestamp at its original value, so a
+        timestamp comparison stays true after the rebuild that was supposed to
+        satisfy it — and every worker rebuilds on every document, forever,
+        producing an identical image each time.
+        """
+        exists = subprocess.run(
+            ["docker", "image", "inspect", "-f", "{{.Id}}", self.DOCKER_IMAGE],
+            capture_output=True, text=True, timeout=10,
         )
-        if created.returncode != 0 or not created.stdout.strip():
+        if exists.returncode != 0 or not exists.stdout.strip():
             return True
 
-        try:
-            built_at = datetime.fromisoformat(
-                created.stdout.strip().replace("Z", "+00:00")
-            ).timestamp()
-        except ValueError:
-            # Unreadable timestamp: rebuild rather than assume it is current
+        stamp_path = os.path.join(build_dir, self.STAMP_FILE)
+        if not os.path.exists(stamp_path):
             return True
-
-        sources = [
-            dockerfile_path,
-            os.path.join(build_dir, "run_extraction.py"),
-            os.path.join(build_dir, "records.py"),
-        ]
-        return any(
-            os.path.getmtime(path) > built_at
-            for path in sources
-            if os.path.exists(path)
-        )
-
-    @staticmethod
-    def _build_job(report: Dict[str, Any], body_text: str) -> str:
-        """The job payload sent to the sandbox over stdin. Pure/sync, shared
-        by _run_extraction and _arun_extraction."""
-        return json.dumps({
-            "body_text": body_text,
-            "delimiter": report.get("delimiter", ","),
-            # Detected by Tool 2; the default only applies when the document
-            # quotes nothing, in which case it cannot matter.
-            "quote_char": report.get("quote_char") or '"',
-            "header_row_index": report.get("header_row_index", 0),
-            # Rows narrower than the header are normal (trailing empties are
-            # trimmed); only rows too short to be this table are dropped.
-            "min_field_count": max(1, int(report.get("modal_field_count", 1) * 0.5)),
-            # Naming happens here, not in the generated code
-            "column_names": report.get("header_names") or [],
-            # And so does the width: the parser reads FIELD_COUNT rather than
-            # embedding a number, which is what lets one parser be cached and
-            # reused across documents of different widths.
-            "field_count": report.get("modal_field_count") or 0,
-            # From the Looker's structural_inspector: trailing rows (totals,
-            # page markers) that are not part of the table. 0 when there is
-            # no footer, so a report without one behaves exactly as before.
-            "skip_footer_lines": max(0, int(report.get("footer_start_from_bottom") or 0)),
-        })
+        with open(stamp_path) as handle:
+            stamped = handle.read().strip()
+        return stamped != self._source_fingerprint(build_dir, dockerfile_path)
 
     def _run_extraction(
         self,
