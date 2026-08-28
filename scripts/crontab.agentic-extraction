@@ -1,0 +1,22 @@
+# Carry this machine's extraction verdicts into mosaic's pii_extraction_status.
+# Off the per-bin path on purpose: four machines write to that table and one
+# updates millions of rows at a time, so a small UPDATE can queue behind it for
+# minutes. Batching a few hours' verdicts takes that lock a handful of times a
+# day instead of a dozen times an hour.
+#
+# Nothing depends on this running promptly -- the queue build anti-joins against
+# agentic_extraction_status, so work already done is skipped whether or not
+# mosaic's table knows yet. This is for progress read from mosaic's side.
+#
+# Absolute paths throughout: cron starts in $HOME, not the repo.
+0 */4 * * * PROJECT_ID=cio-mosaic-analytics-pr-853ae3 PYTHONPATH=/home/jupyter/agentic-extraction-engine /opt/micromamba/bin/python3 /home/jupyter/agentic-extraction-engine/scripts/sync_status_to_mosaic.py --apply >> /home/jupyter/agentic-extraction-engine/logs/sync_status_to_mosaic.log 2>&1
+
+# Install with:
+#     crontab scripts/crontab.agentic-extraction
+# Inspect with:
+#     crontab -l
+#
+# Paths assume the repo at /home/jupyter/agentic-extraction-engine and the
+# interpreter at /opt/micromamba/bin/python3. Edit both if either differs --
+# cron will not find them from a PATH or a shell profile, because it runs
+# neither.
