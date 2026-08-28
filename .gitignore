@@ -64,3 +64,22 @@ Thumbs.db
 
 # Mosaic reference (for architecture design)
 /mosaic-glean-extraction/
+
+# Runtime data, not source. These are written while the pipeline runs and are
+# machine-local: the sheet ledger reaches hundreds of MB and changes every bin,
+# so committing it snapshots a live SQLite file mid-transaction and adds that
+# much to the repo each time. The ledger itself stays — it is just not source.
+cache/*.db
+cache/*.db-wal
+cache/*.db-shm
+metrics.csv
+metrics.json
+metrics.csv.*.bak
+.metrics.lock
+
+# Per-machine build artifact: records the fingerprint of the sources the local
+# Docker image was built from. Committing it would tell a fresh clone its image
+# is current when it has none.
+tools/sandbox_execute/.image_stamp
+
+.ipynb_checkpoints/
