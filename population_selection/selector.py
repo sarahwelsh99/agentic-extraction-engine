@@ -160,6 +160,7 @@ _TABLE_SCHEMA = [
     # extraction/core/bigquery_service.py filters on it, so a row without it is
     # invisible to a source-scoped run.
     bigquery.SchemaField("source", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("gpu_machine", "STRING", mode="NULLABLE"),
 ]
 
 
@@ -187,7 +188,8 @@ def ensure_status_table(client: bigquery.Client, table_id: str) -> None:
         ADD COLUMN IF NOT EXISTS pii_score INT64,
         ADD COLUMN IF NOT EXISTS pii_signals STRING,
         ADD COLUMN IF NOT EXISTS pii_detection_method STRING,
-        ADD COLUMN IF NOT EXISTS source STRING
+        ADD COLUMN IF NOT EXISTS source STRING,
+        ADD COLUMN IF NOT EXISTS gpu_machine STRING
     """).result()
 
 

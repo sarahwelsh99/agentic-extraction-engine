@@ -46,6 +46,10 @@ def initialize_status_table(client: bigquery.Client, table_id: str) -> None:
         # share this table, filtered by source on every read — the same reason
         # mosaic carries it. A single-population table can leave it uniform.
         bigquery.SchemaField("source", "STRING", mode="NULLABLE"),
+        # Which machine produced the verdict. This table is the primary record
+        # of what has been extracted, so the answer has to live here rather than
+        # be joined out of mosaic's table, which now derives from this one.
+        bigquery.SchemaField("gpu_machine", "STRING", mode="NULLABLE"),
     ]
 
     table = bigquery.Table(table_id, schema=schema)
@@ -62,7 +66,8 @@ def initialize_status_table(client: bigquery.Client, table_id: str) -> None:
     # Additive, so it is safe to run on every startup.
     client.query(f"""
         ALTER TABLE `{table_id}`
-        ADD COLUMN IF NOT EXISTS source STRING
+        ADD COLUMN IF NOT EXISTS source STRING,
+        ADD COLUMN IF NOT EXISTS gpu_machine STRING
     """).result()
 
 

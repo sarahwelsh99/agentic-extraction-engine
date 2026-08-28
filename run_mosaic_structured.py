@@ -27,6 +27,7 @@ Usage:
 import argparse
 import logging
 import os
+import socket
 import sys
 import threading
 import queue
@@ -82,11 +83,16 @@ def _get_mosaic_client() -> bigquery.Client:
 def fetch_totals(client: bigquery.Client, statuses: List[str],
                  min_body_length: int) -> Tuple[int, int]:
     query = f"""
-    SELECT COUNT(*) AS n, COALESCE(SUM(body_length), 0) AS total_bytes
-    FROM `{MOSAIC_TABLE_ID}`
-    WHERE status IN UNNEST(@statuses)
-      AND body_text IS NOT NULL
-      AND body_length >= @min_len
+    SELECT COUNT(*) AS n, COALESCE(SUM(m.body_length), 0) AS total_bytes
+    FROM `{MOSAIC_TABLE_ID}` m
+    LEFT JOIN `{AGENTIC_TABLE_ID}` a
+      ON a.guid = m.guid
+     AND a.status IN ('complete', 'error_rejected', 'error_extraction',
+                      'error_pipeline')
+    WHERE m.status IN UNNEST(@statuses)
+      AND m.body_text IS NOT NULL
+      AND m.body_length >= @min_len
+      AND a.guid IS NULL
     """
     job_config = bigquery.QueryJobConfig(query_parameters=[
         bigquery.ArrayQueryParameter("statuses", "STRING", statuses),
@@ -100,13 +106,24 @@ def fetch_metadata(client: bigquery.Client, statuses: List[str], min_body_length
                    limit: Optional[int] = None) -> Generator[Tuple[str, int], None, None]:
     """Stream (guid, body_length), largest first - same shape LPT packing needs."""
     limit_sql = f"LIMIT {int(limit)}" if limit else ""
+    # Anti-joined against our own table on purpose. mosaic's table only learns
+    # a document is done when scripts/sync_status_to_mosaic.py next runs, so
+    # between syncs its structured_pending still lists work already finished --
+    # and a queue rebuilt in that window would redo it. Excluding what our table
+    # already has a verdict on makes correctness independent of the sync
+    # schedule: the sync exists for other people's visibility, not for ours.
     query = f"""
-    SELECT guid, body_length
-    FROM `{MOSAIC_TABLE_ID}`
-    WHERE status IN UNNEST(@statuses)
-      AND body_text IS NOT NULL
-      AND body_length >= @min_len
-    ORDER BY body_length DESC
+    SELECT m.guid, m.body_length
+    FROM `{MOSAIC_TABLE_ID}` m
+    LEFT JOIN `{AGENTIC_TABLE_ID}` a
+      ON a.guid = m.guid
+     AND a.status IN ('complete', 'error_rejected', 'error_extraction',
+                      'error_pipeline')
+    WHERE m.status IN UNNEST(@statuses)
+      AND m.body_text IS NOT NULL
+      AND m.body_length >= @min_len
+      AND a.guid IS NULL
+    ORDER BY m.body_length DESC
     {limit_sql}
     """
     job_config = bigquery.QueryJobConfig(query_parameters=[
@@ -136,6 +153,10 @@ def fetch_bodies_for_guids(client: bigquery.Client, guids: List[str],
             for r in rows]
 
 
+# Kept for scripts/sync_status_to_mosaic.py, which applies our verdicts to
+# mosaic's table on a schedule. Deliberately NOT called per bin any more: four
+# machines write to that table, and a small UPDATE queued behind a
+# multi-million-row statement was costing ~9 minutes of every 20-minute bin.
 def mark_agentic_complete(client: bigquery.Client, guids: List[str]) -> int:
     if not guids:
         return 0
@@ -159,64 +180,48 @@ AGENTIC_TABLE_ID = f"{config.PROJECT_ID}.{config.DATASET_ID}.{config.SOURCE_TABL
 
 def mark_own_status(client: bigquery.Client, guids: List[str], status: str,
                     detail: Optional[str] = None) -> int:
-    """Record the same outcome in our own status table, per bin.
+    """Record this bin's outcome in our own status table.
 
-    This run drains mosaic's structured_pending, so the marks above go to
-    mosaic's table. Our status table tracks a different population that
-    overlaps it, and without this it never learns that a guid it also lists
-    has already been done -- which is what left 127k documents sitting in
-    'pending' after a quarter of a million had been processed.
+    This is the primary record of what has been extracted. The matching write to
+    mosaic's table happens on a schedule instead (scripts/sync_status_to_mosaic.py),
+    because four machines write to that table and one of them updates millions of
+    rows at a time -- a small UPDATE queued behind that can wait minutes, and it
+    was doing so on the critical path of every bin.
 
-    Deliberately not scoped to rows still 'pending'. The two tables are meant to
-    agree about what has been extracted, so a guid this run processed is marked
-    here whatever our selector had previously decided about it -- including one
-    it had ruled out as 'excluded_no_pii'. That verdict is not lost: pii_score,
-    pii_signals and pii_detection_method still carry it, so "what did we extract
-    from the PII-relevant population" stays answerable from those columns rather
-    than from status.
+    A MERGE rather than an UPDATE: about 0.05% of mosaic's structured_pending
+    guids have no row here at all, and an UPDATE would report success while
+    changing nothing, leaving those documents unrecorded and reprocessed forever.
 
-    `detail` carries why a document failed. Without it this table records that
-    198 documents failed and nothing about the cause, and answering "why" means
-    going to the sheet ledger -- a SQLite file on whichever machine happened to
-    run the drain. A whole bin once failed on a missing method, and the status
-    table was unable to say so.
+    `detail` carries why a document failed, and is cleared on success so a
+    document that failed and later succeeded does not keep the old reason.
     """
     if not guids:
         return 0
     job = client.query(
         f"""
-        UPDATE `{AGENTIC_TABLE_ID}`
-        SET status = @status,
+        MERGE `{AGENTIC_TABLE_ID}` T
+        USING UNNEST(@guids) AS g
+        ON T.guid = g
+        WHEN MATCHED THEN UPDATE SET
+            status = @status,
             error_message = @detail,
             extraction_version = 'agentic-v1',
+            gpu_machine = @machine,
             extracted_at = CURRENT_TIMESTAMP()
-        WHERE guid IN UNNEST(@guids)
+        WHEN NOT MATCHED THEN
+            INSERT (guid, status, error_message, extraction_version,
+                    gpu_machine, extracted_at)
+            VALUES (g, @status, @detail, 'agentic-v1', @machine,
+                    CURRENT_TIMESTAMP())
         """,
         job_config=bigquery.QueryJobConfig(query_parameters=[
             bigquery.ArrayQueryParameter("guids", "STRING", guids),
             bigquery.ScalarQueryParameter("status", "STRING", status),
-            # Cleared on success, so a document that failed and later succeeded
-            # does not keep its old reason.
             bigquery.ScalarQueryParameter("detail", "STRING",
                                           (detail or None) and detail[:8192]),
-        ]),
-    )
-    job.result()
-    return job.num_dml_affected_rows or 0
-
-
-def mark_agentic_error(client: bigquery.Client, guids: List[str], outcome: str) -> int:
-    if not guids:
-        return 0
-    job = client.query(
-        f"""
-        UPDATE `{MOSAIC_TABLE_ID}`
-        SET status = @status, updated_at = CURRENT_TIMESTAMP()
-        WHERE guid IN UNNEST(@guids)
-        """,
-        job_config=bigquery.QueryJobConfig(query_parameters=[
-            bigquery.ArrayQueryParameter("guids", "STRING", guids),
-            bigquery.ScalarQueryParameter("status", "STRING", _agentic_error_status(outcome)),
+            # Which machine did the work. mosaic's table already carries this
+            # column and it is the convention here; ours had no way to answer it.
+            bigquery.ScalarQueryParameter("machine", "STRING", socket.gethostname()),
         ]),
     )
     job.result()
@@ -345,8 +350,6 @@ def _commit_bin(client: bigquery.Client, bin_id: int, results: List[dict]) -> Tu
 
     done = [r["guid"] for r in passing] + [r["guid"] for r in empty]
     if done:
-        _mark(f"mark_agentic_complete (bin {bin_id}, {len(done)} guid(s))",
-              lambda: mark_agentic_complete(client, done))
         if _mark(f"mark_own_status complete (bin {bin_id}, {len(done)} guid(s))",
                  lambda: mark_own_status(client, done, "complete")):
             logger.info(f"Bin {bin_id}: {len(done)} document(s) marked complete "
@@ -356,9 +359,6 @@ def _commit_bin(client: bigquery.Client, bin_id: int, results: List[dict]) -> Tu
         failed = [r for r in results if r["outcome"] == outcome]
         if not failed:
             continue
-        _mark(f"mark_agentic_error {outcome} (bin {bin_id}, {len(failed)} guid(s))",
-              lambda o=outcome, f=failed: mark_agentic_error(
-                  client, [r["guid"] for r in f], o))
         _mark(
             f"mark_own_status error_{outcome} (bin {bin_id}, {len(failed)} guid(s))",
             lambda o=outcome, f=failed: mark_own_status(
@@ -368,7 +368,7 @@ def _commit_bin(client: bigquery.Client, bin_id: int, results: List[dict]) -> Tu
                 f"{len(f)} document(s) in bin {bin_id}; first: "
                 f"{f[0].get('detail') or o}"))
         logger.warning(f"Bin {bin_id}: marked {len(failed)} document(s) as "
-                       f"{_agentic_error_status(outcome)}")
+                       f"error_{outcome}")
 
     # A bin that extracts nothing at all is never routine. Bin 0 of an earlier
     # run put 499 documents through in 23 minutes and produced zero rows,
