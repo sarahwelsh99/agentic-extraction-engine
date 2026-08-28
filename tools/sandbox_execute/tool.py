@@ -225,6 +225,32 @@ class SandboxExecuteTool:
             stamped = handle.read().strip()
         return stamped != self._source_fingerprint(build_dir, dockerfile_path)
 
+    @staticmethod
+    def _build_job(report: Dict[str, Any], body_text: str) -> str:
+        """The job payload sent to the sandbox over stdin. Pure/sync, shared
+        by _run_extraction and _arun_extraction."""
+        return json.dumps({
+            "body_text": body_text,
+            "delimiter": report.get("delimiter", ","),
+            # Detected by Tool 2; the default only applies when the document
+            # quotes nothing, in which case it cannot matter.
+            "quote_char": report.get("quote_char") or '"',
+            "header_row_index": report.get("header_row_index", 0),
+            # Rows narrower than the header are normal (trailing empties are
+            # trimmed); only rows too short to be this table are dropped.
+            "min_field_count": max(1, int(report.get("modal_field_count", 1) * 0.5)),
+            # Naming happens here, not in the generated code
+            "column_names": report.get("header_names") or [],
+            # And so does the width: the parser reads FIELD_COUNT rather than
+            # embedding a number, which is what lets one parser be cached and
+            # reused across documents of different widths.
+            "field_count": report.get("modal_field_count") or 0,
+            # From the Looker's structural_inspector: trailing rows (totals,
+            # page markers) that are not part of the table. 0 when there is
+            # no footer, so a report without one behaves exactly as before.
+            "skip_footer_lines": max(0, int(report.get("footer_start_from_bottom") or 0)),
+        })
+
     def _run_extraction(
         self,
         generated_code: str,
