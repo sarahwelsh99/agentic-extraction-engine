@@ -32,11 +32,11 @@ import sys
 import threading
 import queue
 import time
-from typing import Generator, List, Optional, Tuple
+from typing import Dict, Generator, List, Optional, Tuple
 
 from google.cloud import bigquery
 
-from extraction.core import bigquery_service, config, workqueue
+from extraction.core import bigquery_service, config, status_staging, workqueue
 from run_corpus import (
     _process_one, _run_bin, _stop_requested, STOP_FLAG_FILE,
     STATUS_REJECTED, STATUS_EXTRACTION, STATUS_PIPELINE, EXTRACTION_VERSION,
@@ -64,7 +64,13 @@ MOSAIC_TABLE_ID = f"{MOSAIC_PROJECT}.{MOSAIC_DATASET}.{MOSAIC_TABLE}"
 # structured_pending has none of this: a 5,000-doc random sample showed zero
 # SHEET_MARKER occurrences anywhere. Re-add error_dense only after
 # split_sheets() has a sanity guard against pathological marker counts.
-MOSAIC_SOURCE_STATUSES = ["structured_pending"]
+#
+# structured_pending_2 shares _process_one/_run_bin with this file (see module
+# docstring) and has already been through them at production scale via the
+# population_selection -> run_corpus.py path (hundreds of thousands of guids,
+# complete and error outcomes both recorded) before that path was retired in
+# favour of fetching straight from here - it carries no new SHEET_MARKER risk.
+MOSAIC_SOURCE_STATUSES = ["structured_pending", "structured_pending_2"]
 
 # Our own outcomes, written back only to guids we actually processed.
 # Prefixed so they can never collide with a status mosaic's own pipeline
@@ -137,6 +143,12 @@ def fetch_metadata(client: bigquery.Client, statuses: List[str], min_body_length
 
 def fetch_bodies_for_guids(client: bigquery.Client, guids: List[str],
                            chunk_size: int = 15000) -> List[dict]:
+    """Also carries mosaic's own `status` for each guid.
+
+    _commit_bin uses it as the `source` tag written back to our own table,
+    so a guid drained under structured_pending_2 is never mistaken for one
+    drained under structured_pending - see MOSAIC_SOURCE_STATUSES.
+    """
     rows = []
     guids = list(guids)
     for i in range(0, len(guids), chunk_size):
@@ -144,12 +156,13 @@ def fetch_bodies_for_guids(client: bigquery.Client, guids: List[str],
         job_config = bigquery.QueryJobConfig(query_parameters=[
             bigquery.ArrayQueryParameter("guids", "STRING", chunk)])
         query = f"""
-        SELECT guid, body_text, body_length
+        SELECT guid, body_text, body_length, status
         FROM `{MOSAIC_TABLE_ID}`
         WHERE guid IN UNNEST(@guids)
         """
         rows.extend(client.query(query, job_config=job_config).result())
-    return [{"guid": r.guid, "body_text": r.body_text, "body_length": r.body_length}
+    return [{"guid": r.guid, "body_text": r.body_text, "body_length": r.body_length,
+             "mosaic_status": r.status}
             for r in rows]
 
 
@@ -178,54 +191,36 @@ def mark_agentic_complete(client: bigquery.Client, guids: List[str]) -> int:
 AGENTIC_TABLE_ID = f"{config.PROJECT_ID}.{config.DATASET_ID}.{config.SOURCE_TABLE_NAME}"
 
 
-def mark_own_status(client: bigquery.Client, guids: List[str], status: str,
-                    detail: Optional[str] = None) -> int:
-    """Record this bin's outcome in our own status table.
+def mark_own_status(guids: List[str], status: str,
+                    detail: Optional[str] = None, source: Optional[str] = None) -> int:
+    """Stage this bin's outcome locally instead of writing agentic_extraction_status
+    directly.
 
-    This is the primary record of what has been extracted. The matching write to
-    mosaic's table happens on a schedule instead (scripts/sync_status_to_mosaic.py),
-    because four machines write to that table and one of them updates millions of
-    rows at a time -- a small UPDATE queued behind that can wait minutes, and it
-    was doing so on the critical path of every bin.
-
-    A MERGE rather than an UPDATE: about 0.05% of mosaic's structured_pending
-    guids have no row here at all, and an UPDATE would report success while
-    changing nothing, leaving those documents unrecorded and reprocessed forever.
+    This used to MERGE into agentic_extraction_status on the critical path of every
+    bin, one MERGE per bin per outcome. Moved off that path for the same reason
+    mosaic's table was (see scripts/sync_status_to_mosaic.py's docstring): every
+    such write takes agentic_extraction_status's table-level DML lock, and a
+    multi-hour drain across several machines was taking that lock a dozen times an
+    hour for no reason a few-times-a-day batch couldn't serve just as well.
+    scripts/sync_agentic_status.py flushes what's staged here into the table on a
+    schedule.
 
     `detail` carries why a document failed, and is cleared on success so a
     document that failed and later succeeded does not keep the old reason.
+
+    `source` is the mosaic status this guid was drained under (structured_pending
+    or structured_pending_2, from fetch_bodies_for_guids) - naming it after that
+    status, not "drive_files" or any other label, is what keeps this table's
+    `source` column legible against pii_extraction_status's own vocabulary.
     """
     if not guids:
         return 0
-    job = client.query(
-        f"""
-        MERGE `{AGENTIC_TABLE_ID}` T
-        USING UNNEST(@guids) AS g
-        ON T.guid = g
-        WHEN MATCHED THEN UPDATE SET
-            status = @status,
-            error_message = @detail,
-            extraction_version = 'agentic-v1',
-            gpu_machine = @machine,
-            extracted_at = CURRENT_TIMESTAMP()
-        WHEN NOT MATCHED THEN
-            INSERT (guid, status, error_message, extraction_version,
-                    gpu_machine, extracted_at)
-            VALUES (g, @status, @detail, 'agentic-v1', @machine,
-                    CURRENT_TIMESTAMP())
-        """,
-        job_config=bigquery.QueryJobConfig(query_parameters=[
-            bigquery.ArrayQueryParameter("guids", "STRING", guids),
-            bigquery.ScalarQueryParameter("status", "STRING", status),
-            bigquery.ScalarQueryParameter("detail", "STRING",
-                                          (detail or None) and detail[:8192]),
-            # Which machine did the work. mosaic's table already carries this
-            # column and it is the convention here; ours had no way to answer it.
-            bigquery.ScalarQueryParameter("machine", "STRING", socket.gethostname()),
-        ]),
+    machine = socket.gethostname()
+    trimmed_detail = (detail or None) and detail[:8192]
+    status_staging.stage(
+        (guid, status, trimmed_detail, machine, source) for guid in guids
     )
-    job.result()
-    return job.num_dml_affected_rows or 0
+    return len(guids)
 
 
 class _MosaicPrefetcher(threading.Thread):
@@ -329,7 +324,13 @@ def _mark(what: str, fn) -> bool:
         return False
 
 
-def _commit_bin(client: bigquery.Client, bin_id: int, results: List[dict]) -> Tuple[int, int]:
+def _commit_bin(bin_id: int, results: List[dict],
+                guid_to_source: Dict[str, str]) -> Tuple[int, int]:
+    """`guid_to_source` maps each guid to the mosaic status (structured_pending
+    or structured_pending_2) it was fetched under - see fetch_bodies_for_guids -
+    so every mark_own_status call tags `source` with that same name rather than
+    a generic or stale label.
+    """
     from tools import get_tool_by_name
     import json
 
@@ -348,25 +349,35 @@ def _commit_bin(client: bigquery.Client, bin_id: int, results: List[dict]) -> Tu
         logger.info(f"Bin {bin_id}: wrote {rows_loaded} row(s) from "
                     f"{len(passing)} document(s), one Parquet file each")
 
+    def _by_source(guids: List[str]) -> Dict[str, List[str]]:
+        grouped: Dict[str, List[str]] = {}
+        for g in guids:
+            grouped.setdefault(guid_to_source.get(g), []).append(g)
+        return grouped
+
     done = [r["guid"] for r in passing] + [r["guid"] for r in empty]
-    if done:
-        if _mark(f"mark_own_status complete (bin {bin_id}, {len(done)} guid(s))",
-                 lambda: mark_own_status(client, done, "complete")):
-            logger.info(f"Bin {bin_id}: {len(done)} document(s) marked complete "
-                        f"in {config.SOURCE_TABLE_NAME}")
+    for source, guids in _by_source(done).items():
+        if _mark(f"mark_own_status complete (bin {bin_id}, {len(guids)} guid(s), source={source})",
+                 lambda g=guids, s=source: mark_own_status(g, "complete", source=s)):
+            logger.info(f"Bin {bin_id}: {len(guids)} document(s) marked complete "
+                        f"in {config.SOURCE_TABLE_NAME} (source={source})")
 
     for outcome in (STATUS_REJECTED, STATUS_EXTRACTION, STATUS_PIPELINE):
         failed = [r for r in results if r["outcome"] == outcome]
         if not failed:
             continue
-        _mark(
-            f"mark_own_status error_{outcome} (bin {bin_id}, {len(failed)} guid(s))",
-            lambda o=outcome, f=failed: mark_own_status(
-                client, [r["guid"] for r in f], f"error_{o}",
-                # One reason for the group: they share a bin and an outcome, and
-                # per-document detail is what the sheet ledger is for.
-                f"{len(f)} document(s) in bin {bin_id}; first: "
-                f"{f[0].get('detail') or o}"))
+        failed_by_guid = {r["guid"]: r for r in failed}
+        for source, guids in _by_source(list(failed_by_guid.keys())).items():
+            group = [failed_by_guid[g] for g in guids]
+            _mark(
+                f"mark_own_status error_{outcome} (bin {bin_id}, {len(group)} guid(s), source={source})",
+                lambda o=outcome, f=group, g=guids, s=source: mark_own_status(
+                    g, f"error_{o}",
+                    # One reason for the group: they share a bin and an outcome, and
+                    # per-document detail is what the sheet ledger is for.
+                    f"{len(f)} document(s) in bin {bin_id}; first: "
+                    f"{f[0].get('detail') or o}",
+                    source=s))
         logger.warning(f"Bin {bin_id}: marked {len(failed)} document(s) as "
                        f"error_{outcome}")
 
@@ -442,7 +453,8 @@ def main() -> int:
             bin_id, bin_rows = item
 
             results = _run_bin(bin_id, bin_rows, args.workers)
-            loaded_docs, loaded_rows = _commit_bin(client, bin_id, results)
+            guid_to_source = {r["guid"]: r["mosaic_status"] for r in bin_rows}
+            loaded_docs, loaded_rows = _commit_bin(bin_id, results, guid_to_source)
             wq.mark_bin_done(bin_id)
 
             docs += len(results)
