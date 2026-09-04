@@ -32,6 +32,11 @@ def main() -> int:
                         help="Actually run the regex pass; without this, only report current counts")
     parser.add_argument("--source-limit", type=int, default=None,
                         help="Cap how many source rows the regex pass scores this run (for smoke testing)")
+    parser.add_argument("--triage-category", type=str, default=None,
+                        help="Override the source triage_category to select on (default: config.SOURCE_TRIAGE_CATEGORY)")
+    parser.add_argument("--source-label", type=str, default=None,
+                        help="Tag selected rows with this `source` value instead of the source table name -- "
+                             "lets a second population share the source table under its own scoped label")
     args = parser.parse_args()
 
     client = get_bigquery_client()
@@ -45,10 +50,12 @@ def main() -> int:
         print("Dry run. Pass --execute to run the regex pass.\n")
         return 0
 
-    result = select_population(
-        client=client,
-        source_limit=args.source_limit,
-    )
+    kwargs = {"client": client, "source_limit": args.source_limit}
+    if args.triage_category is not None:
+        kwargs["triage_category"] = args.triage_category
+    if args.source_label is not None:
+        kwargs["source_label"] = args.source_label
+    result = select_population(**kwargs)
     logger.info(f"Population selection complete: {result}")
     _print_counts(table_id, get_status_counts(client, table_id))
     return 0

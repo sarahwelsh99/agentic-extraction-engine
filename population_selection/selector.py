@@ -227,6 +227,7 @@ def run_regex_pass(
     source_table: str = config.SOURCE_TABLE,
     triage_category: str = config.SOURCE_TRIAGE_CATEGORY,
     limit: Optional[int] = None,
+    source_label: Optional[str] = None,
 ) -> Dict[str, int]:
     """Score every triage-matched source document for PII and MERGE the result in.
 
@@ -248,6 +249,7 @@ def run_regex_pass(
     value's.
     """
     source_table_id = f"{source_project}.{source_table}"
+    source_label = source_label or source_table
     signal_cols = list(PII_CATEGORY_PATTERNS.items())
     has_cols_sql = ",\n      ".join(
         f"IF(REGEXP_CONTAINS(body_text, r'''{_to_re2(pattern)}'''), 1, 0) AS has_{name.lower()}"
@@ -308,7 +310,7 @@ def run_regex_pass(
     """
     job_config = bigquery.QueryJobConfig(query_parameters=[
         bigquery.ScalarQueryParameter("triage_category", "STRING", triage_category),
-        bigquery.ScalarQueryParameter("source", "STRING", source_table),
+        bigquery.ScalarQueryParameter("source", "STRING", source_label),
     ])
     job = client.query(query, job_config=job_config)
     job.result()
@@ -326,11 +328,16 @@ def get_status_counts(client: bigquery.Client, status_table_id: str) -> Dict[str
 def select_population(
     client: Optional[bigquery.Client] = None,
     source_limit: Optional[int] = None,
+    triage_category: str = config.SOURCE_TRIAGE_CATEGORY,
+    source_label: Optional[str] = None,
 ) -> Dict[str, Dict[str, int]]:
     """Run population selection: one regex pass, no LLM calls.
 
     `source_limit` caps how many source rows are scored, for smoke-testing
-    on a slice before committing to a full-table run.
+    on a slice before committing to a full-table run. `triage_category` and
+    `source_label` let a second population (rows carrying a different
+    triage_category in the same source table) be selected into the status
+    table under its own `source` tag, independent of the default population.
 
     Safe to call repeatedly -- see module docstring.
     """
@@ -338,7 +345,10 @@ def select_population(
     table_id = get_status_table_id()
     ensure_status_table(client, table_id)
 
-    regex_counts = run_regex_pass(client, table_id, limit=source_limit)
+    regex_counts = run_regex_pass(
+        client, table_id, limit=source_limit,
+        triage_category=triage_category, source_label=source_label,
+    )
     logger.info(f"Regex pass: {regex_counts}")
 
     return {"regex": regex_counts}
