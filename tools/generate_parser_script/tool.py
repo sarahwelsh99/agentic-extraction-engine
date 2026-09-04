@@ -482,44 +482,37 @@ CODE:
 
         logger.debug(f"vLLM request: {url}, model={self.vllm_model}, prompt_len={len(prompt)}")
 
-        try:
-            for attempt in range(self.max_retries):
-                try:
-                    response = requests.post(
-                        url,
-                        json=payload,
-                        timeout=self.timeout,
-                    )
-                    response.raise_for_status()
+        for attempt in range(self.max_retries):
+            try:
+                response = requests.post(
+                    url,
+                    json=payload,
+                    timeout=self.timeout,
+                )
+                response.raise_for_status()
 
-                    result = response.json()
-                    if "choices" in result and len(result["choices"]) > 0:
-                        text = result["choices"][0].get("text", "").strip()
+                result = response.json()
+                if "choices" in result and len(result["choices"]) > 0:
+                    text = result["choices"][0].get("text", "").strip()
 
-                        code = self._extract_code(text)
-                        if code:
-                            return code
+                    code = self._extract_code(text)
+                    if code:
+                        return code
 
-                except requests.exceptions.Timeout:
-                    if attempt < self.max_retries - 1:
-                        time.sleep(self._retry_delay(attempt))
-                        continue
-                    raise
-                except requests.exceptions.RequestException as e:
-                    logger.error(f"vLLM request error (attempt {attempt+1}/{self.max_retries}): {e}")
-                    if hasattr(e, 'response') and e.response is not None:
-                        logger.error(f"  Response status: {e.response.status_code}")
-                        logger.error(f"  Response text: {e.response.text[:500]}")
-                    if attempt < self.max_retries - 1:
-                        time.sleep(self._retry_delay(attempt))
-                        continue
-                    raise
-
-        except Exception as e:
-            logger.error(f"vLLM error: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            return None
+            except requests.exceptions.Timeout:
+                if attempt < self.max_retries - 1:
+                    time.sleep(self._retry_delay(attempt))
+                    continue
+                raise
+            except requests.exceptions.RequestException as e:
+                logger.error(f"vLLM request error (attempt {attempt+1}/{self.max_retries}): {e}")
+                if hasattr(e, 'response') and e.response is not None:
+                    logger.error(f"  Response status: {e.response.status_code}")
+                    logger.error(f"  Response text: {e.response.text[:500]}")
+                if attempt < self.max_retries - 1:
+                    time.sleep(self._retry_delay(attempt))
+                    continue
+                raise
 
         return None
 
@@ -537,38 +530,31 @@ CODE:
 
         logger.debug(f"vLLM request (async): {url}, model={self.vllm_model}, prompt_len={len(prompt)}")
 
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                for attempt in range(self.max_retries):
-                    try:
-                        response = await client.post(url, json=payload)
-                        response.raise_for_status()
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            for attempt in range(self.max_retries):
+                try:
+                    response = await client.post(url, json=payload)
+                    response.raise_for_status()
 
-                        result = response.json()
-                        if "choices" in result and len(result["choices"]) > 0:
-                            text = result["choices"][0].get("text", "").strip()
+                    result = response.json()
+                    if "choices" in result and len(result["choices"]) > 0:
+                        text = result["choices"][0].get("text", "").strip()
 
-                            code = self._extract_code(text)
-                            if code:
-                                return code
+                        code = self._extract_code(text)
+                        if code:
+                            return code
 
-                    except httpx.TimeoutException:
-                        if attempt < self.max_retries - 1:
-                            await asyncio.sleep(self._retry_delay(attempt))
-                            continue
-                        raise
-                    except httpx.HTTPError as e:
-                        logger.error(f"vLLM request error (attempt {attempt+1}/{self.max_retries}): {e}")
-                        if attempt < self.max_retries - 1:
-                            await asyncio.sleep(self._retry_delay(attempt))
-                            continue
-                        raise
-
-        except Exception as e:
-            logger.error(f"vLLM error: {e}")
-            import traceback
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            return None
+                except httpx.TimeoutException:
+                    if attempt < self.max_retries - 1:
+                        await asyncio.sleep(self._retry_delay(attempt))
+                        continue
+                    raise
+                except httpx.HTTPError as e:
+                    logger.error(f"vLLM request error (attempt {attempt+1}/{self.max_retries}): {e}")
+                    if attempt < self.max_retries - 1:
+                        await asyncio.sleep(self._retry_delay(attempt))
+                        continue
+                    raise
 
         return None
 
