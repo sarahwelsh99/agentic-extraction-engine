@@ -19,6 +19,13 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CACHE_DB = "cache/schema_code_cache.db"
 
+# SQLite's default busy_timeout is 0: a writer that loses a lock race to
+# another of the 96+ parallel workers fails instantly with "database is
+# locked" instead of waiting. Every connection below sets this explicitly -
+# WAL mode only serializes writers against each other, it does not queue
+# them.
+BUSY_TIMEOUT_MS = 30_000
+
 
 class SchemaCodeCache:
     """SQLite cache for generated extraction code indexed by schema hash.
@@ -43,9 +50,22 @@ class SchemaCodeCache:
         # Initialize database
         self._init_db()
 
+    def _connect(self) -> sqlite3.Connection:
+        """Open a connection tuned for many concurrent workers.
+
+        busy_timeout makes a writer that loses a lock race wait for the
+        holder instead of raising "database is locked" immediately - with
+        96+ parallel workers, that immediate failure was reaching callers as
+        a hard cache error and forcing a needless vLLM regeneration.
+        """
+        conn = sqlite3.connect(self.db_path, timeout=BUSY_TIMEOUT_MS / 1000)
+        conn.execute(f"PRAGMA busy_timeout={BUSY_TIMEOUT_MS}")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        return conn
+
     def _init_db(self) -> None:
         """Create database schema and indexes."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         conn.execute("PRAGMA journal_mode=WAL")  # Enable concurrent access
 
         # Main cache table
@@ -109,7 +129,7 @@ class SchemaCodeCache:
         """
         schema_hash = self._compute_schema_hash(columns)
 
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         cursor = conn.execute(
             """SELECT code, hit_count FROM code_cache
                WHERE schema_hash = ?""",
@@ -142,7 +162,7 @@ class SchemaCodeCache:
         """
         schema_hash = self._compute_schema_hash(columns)
 
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         conn.execute(
             """INSERT OR REPLACE INTO code_cache
                (schema_hash, schema_json, code, code_length, created_at, hit_count)
@@ -169,7 +189,7 @@ class SchemaCodeCache:
             schema_hash: Schema hash to increment
         """
         try:
-            conn = sqlite3.connect(self.db_path)
+            conn = self._connect()
             conn.execute(
                 """UPDATE code_cache
                    SET hit_count = hit_count + 1, last_hit_at = CURRENT_TIMESTAMP
@@ -187,7 +207,7 @@ class SchemaCodeCache:
         Returns:
             Dict with: total_schemas, total_hits, avg_hits, max_hits, cache_size_mb
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
 
         # Get cache stats
         stats = conn.execute(
@@ -222,7 +242,7 @@ class SchemaCodeCache:
 
         Removes bottom 10% of entries by (hit_count, created_at).
         """
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
 
         count = conn.execute("SELECT COUNT(*) FROM code_cache").fetchone()[0]
 
@@ -247,7 +267,7 @@ class SchemaCodeCache:
 
     def clear(self) -> None:
         """Clear entire cache (for testing/reset)."""
-        conn = sqlite3.connect(self.db_path)
+        conn = self._connect()
         conn.execute("DELETE FROM code_cache")
         conn.commit()
         conn.close()
