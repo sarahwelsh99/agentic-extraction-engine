@@ -5,8 +5,15 @@ sheet ledger drove this module: ADDRESS's German/Dutch street-suffix branch
 firing on an ordinary word ("offering" ends in "ring") because the shared
 pattern's (?i) flag defeats its own capital-letter check, and DOB's keyword
 branch firing on the bare word "dob" with no date value anywhere nearby.
-These tests pin both fixes, and confirm true positives for every other
-category (including ADDRESS/DOB's own genuine cases) still match -
+
+FINANCIAL_ACCOUNT and GOVERNMENT_ID's false positives were found later, from
+a 300-guid sample of real body_text pulled from the live
+structured_pending/structured_pending_2 backlog rather than one guid - see
+sheet_pii.py's own module docstring for the full measurements
+(56.3%/1.0%/39.0% of matches respectively).
+
+These tests pin all four fixes, and confirm true positives for every other
+category (including each fixed category's own genuine cases) still match -
 classify_sheet_text() must reuse PII_CATEGORY_PATTERNS unmodified for
 everything it doesn't specifically tighten.
 """
@@ -115,9 +122,76 @@ def test_dob_keyword_with_bare_year_nearby_still_matches():
     print("✓ test_dob_keyword_with_bare_year_nearby_still_matches PASSED")
 
 
+def test_financial_account_digit_run_stitched_from_separate_numbers_is_suppressed():
+    """Real false positive found in a 300-guid sample: the loose digit-run
+    branch allows a separator after every digit, so it stitched three
+    separate 8-digit case numbers together into a fake 24-digit "account
+    number" - none of them are 13-19 digits on their own."""
+    text = "Case, 19663844 19663057 19663614, closed"
+    result = classify_sheet_text(text)
+
+    assert result["has_pii"] is False
+    assert "FINANCIAL_ACCOUNT" not in result["pii_signals"]
+
+    print("✓ test_financial_account_digit_run_stitched_from_separate_numbers_is_suppressed PASSED")
+
+
+def test_financial_account_bare_swift_is_suppressed():
+    """Real false positive: swift's optional suffix let the bare word match
+    ordinary usage with no banking context at all."""
+    text = "the agent handled the issue with swift action"
+    result = classify_sheet_text(text)
+
+    assert result["has_pii"] is False
+    assert "FINANCIAL_ACCOUNT" not in result["pii_signals"]
+
+    print("✓ test_financial_account_bare_swift_is_suppressed PASSED")
+
+
+def test_financial_account_unbroken_digit_run_without_context_is_suppressed():
+    """Real false positive: a genuinely unbroken 13-19 digit token is still
+    common, non-financial data - here a German phone number with country
+    code - when no financial-context keyword sits nearby."""
+    text = "Adam Fronia;00492251954304445; 01.09.2025 00:00:00"
+    result = classify_sheet_text(text)
+
+    assert result["has_pii"] is False
+    assert "FINANCIAL_ACCOUNT" not in result["pii_signals"]
+
+    print("✓ test_financial_account_unbroken_digit_run_without_context_is_suppressed PASSED")
+
+
+def test_financial_account_genuine_card_number_with_keyword_still_matches():
+    """A real card number sitting next to its product name must still trip
+    FINANCIAL_ACCOUNT - the fix only requires nearby context, it doesn't
+    remove the digit-run branch. Confirmed on a real call-center card-issuing
+    export (guid 0098dfd0-7dbc-049a-e47d-afe9cc637b3e)."""
+    result = classify_sheet_text("#9156339430850005821,AEROPLAN VISA INFINITE CARD,M2")
+
+    assert result["has_pii"] is True
+    assert "FINANCIAL_ACCOUNT" in result["pii_signals"]
+
+    print("✓ test_financial_account_genuine_card_number_with_keyword_still_matches PASSED")
+
+
+def test_government_id_bare_twelve_digits_is_suppressed():
+    """Real false positive found in a 300-guid sample: bare \\d{12} requires
+    no context at all, so an ordinary 12-digit number with no visible ID
+    context (an internal reference number, in this case) matched."""
+    text = "ref 591055516300 closed without action"
+    result = classify_sheet_text(text)
+
+    assert result["has_pii"] is False
+    assert "GOVERNMENT_ID" not in result["pii_signals"]
+
+    print("✓ test_government_id_bare_twelve_digits_is_suppressed PASSED")
+
+
 def test_other_categories_are_untouched():
-    """Every category besides ADDRESS/DOB must behave identically to the
-    shared classify_text() - no extra check applied."""
+    """Every category besides ADDRESS/DOB/FINANCIAL_ACCOUNT/GOVERNMENT_ID
+    must behave identically to the shared classify_text() - no extra check
+    applied. GOVERNMENT_ID's own SSN-format branch is unambiguous and still
+    matches immediately despite being a tightened category."""
     result = classify_sheet_text("SSN: 123-45-6789,x")
 
     assert result["has_pii"] is True
@@ -147,6 +221,11 @@ def run_all_tests():
         test_genuine_mailing_address_phrase_still_matches,
         test_genuine_dob_with_date_value_still_matches,
         test_dob_keyword_with_bare_year_nearby_still_matches,
+        test_financial_account_digit_run_stitched_from_separate_numbers_is_suppressed,
+        test_financial_account_bare_swift_is_suppressed,
+        test_financial_account_unbroken_digit_run_without_context_is_suppressed,
+        test_financial_account_genuine_card_number_with_keyword_still_matches,
+        test_government_id_bare_twelve_digits_is_suppressed,
         test_other_categories_are_untouched,
         test_no_pii_text_scores_clean,
     ]
