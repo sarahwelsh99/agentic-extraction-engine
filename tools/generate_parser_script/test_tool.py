@@ -5,8 +5,23 @@ structure only, so these tests assert on parsing behaviour, never on meaning.
 """
 
 import json
+import os
+import tempfile
+import extraction.schema_code_cache as schema_code_cache
 from tools.generate_parser_script.tool import GenerateParserScriptTool
-from extraction.schema_code_cache import get_cache
+from extraction.schema_code_cache import SchemaCodeCache, get_cache
+
+# get_cache() is a process-wide singleton pointed at cache/schema_code_cache.db
+# by default - the same file every machine's live drain reads and writes.
+# Forcing that singleton onto an isolated temp db here, before any test runs,
+# is what test_generates_a_working_parser's get_cache().clear() actually
+# clears: previously it cleared the shared production cache itself, silently
+# discarding every other machine's generated parsers (see docs/CLAUDE.md's
+# "Mistake 4"). This must happen at import time, before GenerateParserScriptTool()
+# ever calls get_cache() and locks the singleton onto the real path first.
+schema_code_cache._cache_instance = SchemaCodeCache(
+    db_path=os.path.join(tempfile.mkdtemp(prefix="schema_code_cache_test_"), "cache.db")
+)
 
 
 REPORT = {
