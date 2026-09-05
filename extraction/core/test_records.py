@@ -104,6 +104,40 @@ def test_each_sheets_tail_is_its_own_not_the_documents():
     print("✓ test_each_sheets_tail_is_its_own_not_the_documents PASSED")
 
 
+def test_a_marker_dense_document_is_not_a_real_workbook():
+    """Real bug found on guid 71d9e6c5-3ccf-2ec1-b77b-a62662b9b400: an
+    automated test-run log, not a workbook at all, where 707 of 712 lines
+    (99.3%) happened to end in SHEET_MARKER. Fanning that out would cost 707
+    concurrent LLM calls for a document with no real tabs - the same failure
+    mode already known for error_dense's 3,373-sheet flattened-PDF incident,
+    just smaller and inside a population assumed clean of it. A document this
+    marker-dense falls back to a single, untouched sheet instead."""
+    marker_rows = [f"row{i}{SHEET_MARKER}" for i in range(10)]
+    body = ROW_SEPARATOR.join(marker_rows + ["real data row"])  # 10/11 = 90.9%
+
+    blocks = split_sheets(body)
+
+    assert len(blocks) == 1
+    assert blocks[0].name is None
+    assert blocks[0].body_text == body
+
+    print("✓ test_a_marker_dense_document_is_not_a_real_workbook PASSED")
+
+
+def test_marker_density_at_the_threshold_still_splits():
+    """Exactly 90% marker density is still trusted as a real workbook - the
+    guard only catches density strictly above that, not at it, so genuine
+    workbooks (checked at 10-12% density) are nowhere near being caught."""
+    marker_rows = [f"row{i}{SHEET_MARKER}" for i in range(9)]
+    body = ROW_SEPARATOR.join(marker_rows + ["real data row"])  # 9/10 = 90.0%
+
+    blocks = split_sheets(body)
+
+    assert len(blocks) > 1, "exactly at the threshold must still split normally"
+
+    print("✓ test_marker_density_at_the_threshold_still_splits PASSED")
+
+
 def test_empty_document_is_a_single_empty_sheet():
     assert split_sheets("") == split_sheets(None)
     blocks = split_sheets("")
@@ -120,6 +154,8 @@ def run_all_tests():
         test_multiple_sheets_are_split_with_their_own_header_and_data,
         test_a_second_marker_row_that_is_not_a_header_is_its_own_sheet,
         test_each_sheets_tail_is_its_own_not_the_documents,
+        test_a_marker_dense_document_is_not_a_real_workbook,
+        test_marker_density_at_the_threshold_still_splits,
         test_empty_document_is_a_single_empty_sheet,
     ]
     passed = failed = 0

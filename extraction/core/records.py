@@ -114,6 +114,26 @@ def _looks_like_header_row(text: str) -> bool:
     return len(non_empty) >= 2
 
 
+# A document whose marker-terminated lines dominate its total line count is
+# not a real multi-tab workbook - a genuine workbook's tabs hold actual data,
+# not wall-to-wall boundaries. Confirmed on a real structured_pending guid (an
+# automated test-run log, 707 of 712 lines marker-terminated - 99.3% density)
+# that would otherwise fan out into 707 concurrent LLM calls for a document
+# that is not a workbook at all. Same failure mode already documented for
+# error_dense's 3,373-sheet flattened-PDF incident, just smaller and inside a
+# population assumed clean of it. Two real multi-tab workbooks checked
+# alongside it sat at 10-12% density, so 90% catches only the pathological
+# case rather than anything resembling genuine tab structure.
+MAX_MARKER_DENSITY = 0.9
+
+
+def _looks_like_a_real_workbook(rows: List[str]) -> bool:
+    if not rows:
+        return True
+    marker_rows = sum(1 for row in rows if row.endswith(SHEET_MARKER))
+    return marker_rows / len(rows) <= MAX_MARKER_DENSITY
+
+
 def split_sheets(body_text: str) -> List[SheetBlock]:
     """Split a flattened document into its worksheets, preserving position.
 
@@ -139,9 +159,11 @@ def split_sheets(body_text: str) -> List[SheetBlock]:
 
     Returns:
         One SheetBlock per detected worksheet, in document order. A document
-        with no SHEET_MARKER rows at all (an ordinary, non-workbook source)
-        returns a single SheetBlock(name=None, body_text=<original text>),
-        so callers never need to special-case "not actually multi-sheet".
+        with no SHEET_MARKER rows at all (an ordinary, non-workbook source),
+        or one so marker-dense it fails _looks_like_a_real_workbook's sanity
+        check, returns a single SheetBlock(name=None, body_text=<original
+        text>), so callers never need to special-case "not actually
+        multi-sheet" or "not actually a workbook at all".
     """
     if not body_text:
         return [SheetBlock(name=None, body_text=body_text or "")]
@@ -158,6 +180,9 @@ def split_sheets(body_text: str) -> List[SheetBlock]:
         if ROW_SEPARATOR in body_text
         else body_text.split("\n")
     )
+
+    if not _looks_like_a_real_workbook(rows):
+        return [SheetBlock(name=None, body_text=body_text)]
 
     blocks: List[SheetBlock] = []
     current_name: Optional[str] = None
