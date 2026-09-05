@@ -27,7 +27,12 @@
 # single machine bootstraps its own complete cache within ~10-15 minutes, so
 # a slower sync would arrive too late to ever help. See
 # scripts/sync_schema_cache.py's own docstring for the full reasoning.
-*/5 * * * * PROJECT_ID=cio-mosaic-analytics-pr-853ae3 PYTHONPATH=/home/jupyter/agentic-extraction-engine /opt/micromamba/bin/python3 /home/jupyter/agentic-extraction-engine/scripts/sync_schema_cache.py --apply >> /home/jupyter/agentic-extraction-engine/logs/sync_schema_cache.log 2>&1
+#
+# cd's into the repo first (unlike the two syncs above) because this script's
+# --local-db defaults to the relative cache/schema_code_cache.db -- cron starts
+# in $HOME, so without the cd it fails with "unable to open database file".
+# Same fix works on all three machines since they share this repo path.
+*/5 * * * * cd /home/jupyter/agentic-extraction-engine && PROJECT_ID=cio-mosaic-analytics-pr-853ae3 PYTHONPATH=/home/jupyter/agentic-extraction-engine /opt/micromamba/bin/python3 scripts/sync_schema_cache.py --apply >> /home/jupyter/agentic-extraction-engine/logs/sync_schema_cache.log 2>&1
 
 # Install with:
 #     crontab scripts/crontab.agentic-extraction
