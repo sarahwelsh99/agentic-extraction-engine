@@ -87,7 +87,7 @@ def _get_mosaic_client() -> bigquery.Client:
 
 
 def fetch_totals(client: bigquery.Client, statuses: List[str],
-                 min_body_length: int) -> Tuple[int, int]:
+                 min_body_length: int, machine: str) -> Tuple[int, int]:
     query = f"""
     SELECT COUNT(*) AS n, COALESCE(SUM(m.body_length), 0) AS total_bytes
     FROM `{MOSAIC_TABLE_ID}` m
@@ -96,12 +96,14 @@ def fetch_totals(client: bigquery.Client, statuses: List[str],
      AND a.status IN ('complete', 'error_rejected', 'error_extraction',
                       'error_pipeline')
     WHERE m.status IN UNNEST(@statuses)
+      AND m.gpu_machine = @machine
       AND m.body_text IS NOT NULL
       AND m.body_length >= @min_len
       AND a.guid IS NULL
     """
     job_config = bigquery.QueryJobConfig(query_parameters=[
         bigquery.ArrayQueryParameter("statuses", "STRING", statuses),
+        bigquery.ScalarQueryParameter("machine", "STRING", machine),
         bigquery.ScalarQueryParameter("min_len", "INT64", min_body_length),
     ])
     row = list(client.query(query, job_config=job_config).result())[0]
@@ -109,8 +111,13 @@ def fetch_totals(client: bigquery.Client, statuses: List[str],
 
 
 def fetch_metadata(client: bigquery.Client, statuses: List[str], min_body_length: int,
-                   limit: Optional[int] = None) -> Generator[Tuple[str, int], None, None]:
-    """Stream (guid, body_length), largest first - same shape LPT packing needs."""
+                   machine: str, limit: Optional[int] = None) -> Generator[Tuple[str, int], None, None]:
+    """Stream (guid, body_length), largest first - same shape LPT packing needs.
+
+    `machine` restricts this to the third of the backlog assigned to this host
+    via mosaic's own gpu_machine column, so the three machines draining this
+    source in parallel never claim the same guid.
+    """
     limit_sql = f"LIMIT {int(limit)}" if limit else ""
     # Anti-joined against our own table on purpose. mosaic's table only learns
     # a document is done when scripts/sync_status_to_mosaic.py next runs, so
@@ -126,6 +133,7 @@ def fetch_metadata(client: bigquery.Client, statuses: List[str], min_body_length
      AND a.status IN ('complete', 'error_rejected', 'error_extraction',
                       'error_pipeline')
     WHERE m.status IN UNNEST(@statuses)
+      AND m.gpu_machine = @machine
       AND m.body_text IS NOT NULL
       AND m.body_length >= @min_len
       AND a.guid IS NULL
@@ -134,6 +142,7 @@ def fetch_metadata(client: bigquery.Client, statuses: List[str], min_body_length
     """
     job_config = bigquery.QueryJobConfig(query_parameters=[
         bigquery.ArrayQueryParameter("statuses", "STRING", statuses),
+        bigquery.ScalarQueryParameter("machine", "STRING", machine),
         bigquery.ScalarQueryParameter("min_len", "INT64", min_body_length),
     ])
     query_job = client.query(query, job_config=job_config)
@@ -258,7 +267,7 @@ class _MosaicPrefetcher(threading.Thread):
 
 
 def _build_or_resume(client: bigquery.Client, statuses: List[str], min_body_length: int,
-                     target_bin_guids: int, limit: Optional[int]) -> Optional[workqueue.WorkQueue]:
+                     target_bin_guids: int, limit: Optional[int], machine: str) -> Optional[workqueue.WorkQueue]:
     path = workqueue._db_path("mosaic_structured_dense")
     if os.path.exists(path):
         wq = workqueue.WorkQueue(path)
@@ -280,7 +289,7 @@ def _build_or_resume(client: bigquery.Client, statuses: List[str], min_body_leng
                     os.remove(side)
 
     total_guids, total_bytes = bigquery_service.retry_bq(
-        "fetch_totals", lambda: fetch_totals(client, statuses, min_body_length))
+        "fetch_totals", lambda: fetch_totals(client, statuses, min_body_length, machine))
     if limit:
         total_guids = min(total_guids, limit)
     if total_guids == 0:
@@ -294,7 +303,7 @@ def _build_or_resume(client: bigquery.Client, statuses: List[str], min_body_leng
     wq = workqueue.WorkQueue(path)
 
     def _build_attempt():
-        metadata = fetch_metadata(client, statuses, min_body_length, limit)
+        metadata = fetch_metadata(client, statuses, min_body_length, machine, limit)
         wq.build(metadata, num_bins)
 
     bigquery_service.retry_bq(f"work queue build ({total_guids} guid metadata)", _build_attempt)
@@ -409,6 +418,13 @@ def main() -> int:
     parser.add_argument("--bin-size", type=int, default=config.QUEUE_TARGET_BIN_GUIDS)
     parser.add_argument("--min-body-length", type=int, default=50)
     parser.add_argument("--statuses", nargs="+", default=MOSAIC_SOURCE_STATUSES)
+    parser.add_argument("--machine", default=socket.gethostname(),
+                        help="Only drain guids mosaic's table assigns to this gpu_machine "
+                             "(default: this host's own hostname) -- the backlog is split "
+                             "three ways across workbench-glean-analytics-gpu4-pr, "
+                             "workbench-drive-extraction-gpu4-pr and "
+                             "workbench-extraction-agent-gpu4-pr so the three machines "
+                             "never claim the same guid")
     args = parser.parse_args()
 
     if not config.PROJECT_ID:
@@ -419,10 +435,11 @@ def main() -> int:
         return 2
 
     client = _get_mosaic_client()
-    logger.info(f"Source: {MOSAIC_TABLE_ID}   statuses: {args.statuses}")
+    logger.info(f"Source: {MOSAIC_TABLE_ID}   statuses: {args.statuses}   "
+                f"machine: {args.machine}")
 
     total_guids, total_bytes = bigquery_service.retry_bq(
-        "fetch_totals", lambda: fetch_totals(client, args.statuses, args.min_body_length))
+        "fetch_totals", lambda: fetch_totals(client, args.statuses, args.min_body_length, args.machine))
     logger.info(f"Matching backlog: {total_guids} document(s), {total_bytes/1e6:.0f} MB")
 
     if args.dry_run:
@@ -436,7 +453,8 @@ def main() -> int:
         logger.info("Nothing matching.")
         return 0
 
-    wq = _build_or_resume(client, args.statuses, args.min_body_length, args.bin_size, args.limit)
+    wq = _build_or_resume(client, args.statuses, args.min_body_length, args.bin_size, args.limit,
+                          args.machine)
     if wq is None:
         return 0
 
