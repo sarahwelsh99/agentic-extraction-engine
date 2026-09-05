@@ -19,7 +19,12 @@
 #
 # A guid whose verdict hasn't synced yet just gets reprocessed on the next
 # drain -- more work, not wrong work.
-0 */4 * * * PROJECT_ID=cio-mosaic-analytics-pr-853ae3 PYTHONPATH=/home/jupyter/agentic-extraction-engine /opt/micromamba/bin/python3 /home/jupyter/agentic-extraction-engine/scripts/sync_agentic_status.py --apply >> /home/jupyter/agentic-extraction-engine/logs/sync_agentic_status.log 2>&1
+#
+# cd's into the repo first (same reason as the schema-cache sync below):
+# --staging-db defaults to the relative cache/agentic_status_staging.db, and
+# cron starts in $HOME, so without the cd this fails with "unable to open
+# database file".
+0 */4 * * * cd /home/jupyter/agentic-extraction-engine && PROJECT_ID=cio-mosaic-analytics-pr-853ae3 PYTHONPATH=/home/jupyter/agentic-extraction-engine /opt/micromamba/bin/python3 scripts/sync_agentic_status.py --apply >> /home/jupyter/agentic-extraction-engine/logs/sync_agentic_status.log 2>&1
 
 # Share Tool 3's schema/code cache across the three machines draining the
 # mosaic backlog in parallel. Every 5 minutes on purpose, not every 4 hours
