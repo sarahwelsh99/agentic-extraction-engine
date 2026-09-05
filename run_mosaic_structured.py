@@ -97,7 +97,12 @@ def fetch_totals(client: bigquery.Client, statuses: List[str],
                       'error_pipeline')
     WHERE m.status IN UNNEST(@statuses)
       AND m.gpu_machine = @machine
-      AND m.body_text IS NOT NULL
+      -- No separate body_text IS NOT NULL check: body_length is NULL whenever
+      -- body_text is, and NULL >= @min_len is never true, so body_length >=
+      -- @min_len already excludes those rows regardless of @min_len's value.
+      -- Referencing body_text here would force BigQuery to scan that column
+      -- across the whole 500+ GB table for a value neither query selects -
+      -- confirmed via dry-run this was ~530 GB of the ~532 GB scanned.
       AND m.body_length >= @min_len
       AND a.guid IS NULL
     """
@@ -134,7 +139,12 @@ def fetch_metadata(client: bigquery.Client, statuses: List[str], min_body_length
                       'error_pipeline')
     WHERE m.status IN UNNEST(@statuses)
       AND m.gpu_machine = @machine
-      AND m.body_text IS NOT NULL
+      -- No separate body_text IS NOT NULL check: body_length is NULL whenever
+      -- body_text is, and NULL >= @min_len is never true, so body_length >=
+      -- @min_len already excludes those rows regardless of @min_len's value.
+      -- Referencing body_text here would force BigQuery to scan that column
+      -- across the whole 500+ GB table for a value neither query selects -
+      -- confirmed via dry-run this was ~530 GB of the ~532 GB scanned.
       AND m.body_length >= @min_len
       AND a.guid IS NULL
     ORDER BY m.body_length DESC
