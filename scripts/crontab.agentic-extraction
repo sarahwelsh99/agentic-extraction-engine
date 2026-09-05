@@ -21,6 +21,14 @@
 # drain -- more work, not wrong work.
 0 */4 * * * PROJECT_ID=cio-mosaic-analytics-pr-853ae3 PYTHONPATH=/home/jupyter/agentic-extraction-engine /opt/micromamba/bin/python3 /home/jupyter/agentic-extraction-engine/scripts/sync_agentic_status.py --apply >> /home/jupyter/agentic-extraction-engine/logs/sync_agentic_status.log 2>&1
 
+# Share Tool 3's schema/code cache across the three machines draining the
+# mosaic backlog in parallel. Every 5 minutes on purpose, not every 4 hours
+# like the two syncs above: the cache key has so few possible values that a
+# single machine bootstraps its own complete cache within ~10-15 minutes, so
+# a slower sync would arrive too late to ever help. See
+# scripts/sync_schema_cache.py's own docstring for the full reasoning.
+*/5 * * * * PROJECT_ID=cio-mosaic-analytics-pr-853ae3 PYTHONPATH=/home/jupyter/agentic-extraction-engine /opt/micromamba/bin/python3 /home/jupyter/agentic-extraction-engine/scripts/sync_schema_cache.py --apply >> /home/jupyter/agentic-extraction-engine/logs/sync_schema_cache.log 2>&1
+
 # Install with:
 #     crontab scripts/crontab.agentic-extraction
 # Inspect with:
