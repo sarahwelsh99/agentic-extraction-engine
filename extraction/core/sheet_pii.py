@@ -61,6 +61,19 @@ guid) - see FINANCIAL_ACCOUNT/GOVERNMENT_ID below:
   own, the same principle DOB already applies to a bare keyword or a bare
   date alone.
 
+CREDENTIAL and PERSONAL_EMAIL were checked against the same kind of
+300-guid sample. PERSONAL_EMAIL was clean - every sampled match was a real
+address against the whitelisted personal-domain list, no fix needed.
+CREDENTIAL was not: password/passcode/security-code/one-time-code all match
+on the bare keyword alone, and in this customer-service ticket domain that
+is overwhelmingly a ticket *topic* ("Password Reset", "Invalid Password"),
+not an actual leaked secret. Measured: 94.6% (280/296) of bare
+password/passcode matches had no value anywhere near the keyword at all.
+Fixed the same way DOB's bare-keyword bug was: require an actual value
+(a colon/equals followed by real content, not an empty CSV field) before
+trusting it - pin's own branch already required this shape and needed no
+change.
+
 This module does NOT edit population_selection/selector.py's
 PII_CATEGORY_PATTERNS or classify_text(): that's the corpus-level rule,
 already validated at scale (see docs/CLAUDE.md's backtest numbers), and
@@ -68,8 +81,8 @@ changing its regex - even to fix a real bug - changes established behavior
 without a backtest to confirm the new false-positive/false-negative balance
 is still acceptable. classify_sheet_text() reuses the same patterns for
 every other category verbatim, and only tightens ADDRESS/DOB/
-FINANCIAL_ACCOUNT/GOVERNMENT_ID with an additional check before trusting a
-match.
+FINANCIAL_ACCOUNT/GOVERNMENT_ID/CREDENTIAL with an additional check before
+trusting a match.
 """
 
 import re
@@ -223,11 +236,38 @@ def _government_id_is_genuine(text: str) -> bool:
     return False
 
 
+# CREDENTIAL's pin branch already requires an assignment ("pin: ..." /
+# "pin= ..."); password/passcode/security-code/one-time-code do not, and in
+# a customer-service ticket domain they are overwhelmingly a ticket
+# *topic* ("Password Reset", "Invalid Password"), not an actual leaked
+# secret. Measured on a 300-guid sample: 94.6% (280/296) of bare
+# password/passcode matches had no value anywhere - just the word.
+_CREDENTIAL_UNAMBIGUOUS = re.compile(r"(?i)\bpin\s*(?:code|number)?\s*[:=]")
+# A colon/equals immediately after the keyword, followed by real content -
+# not empty (a bare "Password:" label with nothing after it, or immediately
+# followed by a comma/quote/newline, is exactly the empty-field shape
+# confirmed on real spreadsheet-style tickets: "PASSWORD:,,,,\"Is needed...").
+# Known limitation: this cannot tell an actual secret from a filename
+# ("Password:\n\nimage1.jpg" would still pass) - there is no reliable value
+# shape for a password the way there is for a date or a digit run.
+_CREDENTIAL_VALUE_NEARBY = re.compile(
+    r"(?i)\b(?:password|passcode|security\s+code|"
+    r"one[-\s]time\s+(?:code|passcode|password))\b\s*[:=]\s*[^\s,\"\n]{3,}"
+)
+
+
+def _credential_is_genuine(text: str) -> bool:
+    if _CREDENTIAL_UNAMBIGUOUS.search(text):
+        return True
+    return bool(_CREDENTIAL_VALUE_NEARBY.search(text))
+
+
 _EXTRA_CHECKS = {
     "ADDRESS": _address_is_genuine,
     "DOB": _dob_is_genuine,
     "FINANCIAL_ACCOUNT": _financial_account_is_genuine,
     "GOVERNMENT_ID": _government_id_is_genuine,
+    "CREDENTIAL": _credential_is_genuine,
 }
 
 

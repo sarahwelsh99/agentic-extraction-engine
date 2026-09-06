@@ -187,11 +187,62 @@ def test_government_id_bare_twelve_digits_is_suppressed():
     print("✓ test_government_id_bare_twelve_digits_is_suppressed PASSED")
 
 
+def test_credential_bare_password_topic_is_suppressed():
+    """Real false positive found in a 300-guid sample: in this
+    customer-service ticket domain, a bare "password" mention is
+    overwhelmingly a ticket topic/category, not an actual leaked secret -
+    94.6% (280/296) of matches had no value anywhere near the keyword."""
+    text = "Type,Case,,\n\nBilling,Password Reset,,\n\nAccess,Invalid Password,,"
+    result = classify_sheet_text(text)
+
+    assert result["has_pii"] is False
+    assert "CREDENTIAL" not in result["pii_signals"]
+
+    print("✓ test_credential_bare_password_topic_is_suppressed PASSED")
+
+
+def test_credential_labeled_field_with_no_value_is_suppressed():
+    """A field label with an empty CSV value ("PASSWORD:,,,") must not be
+    mistaken for a filled-in secret - confirmed on a real spreadsheet-style
+    ticket export."""
+    text = 'PASSWORD:,,,,"Is needed to update Location, Dimensions, Invoice"'
+    result = classify_sheet_text(text)
+
+    assert result["has_pii"] is False
+    assert "CREDENTIAL" not in result["pii_signals"]
+
+    print("✓ test_credential_labeled_field_with_no_value_is_suppressed PASSED")
+
+
+def test_credential_genuine_value_still_matches():
+    """A real value after the keyword must still trip CREDENTIAL - the fix
+    only requires an actual value, it doesn't remove the branch. Confirmed
+    on a real guid (0027bc1a-4d5a-2d13-3b76-6ee8483c1d12)."""
+    result = classify_sheet_text("Video Demo (Password: CU9A0n=z)")
+
+    assert result["has_pii"] is True
+    assert "CREDENTIAL" in result["pii_signals"]
+
+    print("✓ test_credential_genuine_value_still_matches PASSED")
+
+
+def test_credential_pin_with_assignment_still_matches():
+    """CREDENTIAL's pin branch already required an assignment before this
+    fix and must be unaffected by it."""
+    result = classify_sheet_text("PIN: 4829")
+
+    assert result["has_pii"] is True
+    assert "CREDENTIAL" in result["pii_signals"]
+
+    print("✓ test_credential_pin_with_assignment_still_matches PASSED")
+
+
 def test_other_categories_are_untouched():
-    """Every category besides ADDRESS/DOB/FINANCIAL_ACCOUNT/GOVERNMENT_ID
-    must behave identically to the shared classify_text() - no extra check
-    applied. GOVERNMENT_ID's own SSN-format branch is unambiguous and still
-    matches immediately despite being a tightened category."""
+    """Every category besides ADDRESS/DOB/FINANCIAL_ACCOUNT/GOVERNMENT_ID/
+    CREDENTIAL must behave identically to the shared classify_text() - no
+    extra check applied. GOVERNMENT_ID's own SSN-format branch is
+    unambiguous and still matches immediately despite being a tightened
+    category."""
     result = classify_sheet_text("SSN: 123-45-6789,x")
 
     assert result["has_pii"] is True
@@ -226,6 +277,10 @@ def run_all_tests():
         test_financial_account_unbroken_digit_run_without_context_is_suppressed,
         test_financial_account_genuine_card_number_with_keyword_still_matches,
         test_government_id_bare_twelve_digits_is_suppressed,
+        test_credential_bare_password_topic_is_suppressed,
+        test_credential_labeled_field_with_no_value_is_suppressed,
+        test_credential_genuine_value_still_matches,
+        test_credential_pin_with_assignment_still_matches,
         test_other_categories_are_untouched,
         test_no_pii_text_scores_clean,
     ]
