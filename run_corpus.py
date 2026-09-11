@@ -155,6 +155,7 @@ def _process_one(guid: str, body_text: str) -> Dict:
                 _sheet_detail(result)
                 or result.get("rejection_reason") or result.get("rejection_code") or "rejected"
             ),
+            "document_type": result.get("document_type"),
             "rows": [],
         }
     if not result.get("success"):

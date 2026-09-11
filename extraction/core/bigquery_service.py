@@ -33,6 +33,9 @@ def initialize_status_table(client: bigquery.Client, table_id: str) -> None:
     - error_message: error details if status is error*
     - body_length: size of input document
     - body_text: input document text
+    - document_type: classify_document_type()'s category, when gate 2 actually
+      ran and rejected on it - NULL for every other outcome (gate 1 never
+      reaches gate 2, and a passing/failed document was never classified)
     """
     schema = [
         bigquery.SchemaField("guid", "STRING", mode="REQUIRED"),
@@ -50,6 +53,10 @@ def initialize_status_table(client: bigquery.Client, table_id: str) -> None:
         # of what has been extracted, so the answer has to live here rather than
         # be joined out of mosaic's table, which now derives from this one.
         bigquery.SchemaField("gpu_machine", "STRING", mode="NULLABLE"),
+        # classify_document_type()'s category for a gate-2 (SKIPPED_DOCUMENT_TYPE)
+        # rejection - NULL for every other outcome, since gate 2 is only reached
+        # once gate 1 already found a real PII signal.
+        bigquery.SchemaField("document_type", "STRING", mode="NULLABLE"),
     ]
 
     table = bigquery.Table(table_id, schema=schema)
@@ -67,7 +74,8 @@ def initialize_status_table(client: bigquery.Client, table_id: str) -> None:
     client.query(f"""
         ALTER TABLE `{table_id}`
         ADD COLUMN IF NOT EXISTS source STRING,
-        ADD COLUMN IF NOT EXISTS gpu_machine STRING
+        ADD COLUMN IF NOT EXISTS gpu_machine STRING,
+        ADD COLUMN IF NOT EXISTS document_type STRING
     """).result()
 
 

@@ -211,7 +211,8 @@ AGENTIC_TABLE_ID = f"{config.PROJECT_ID}.{config.DATASET_ID}.{config.SOURCE_TABL
 
 
 def mark_own_status(guids: List[str], status: str,
-                    detail: Optional[str] = None, source: Optional[str] = None) -> int:
+                    detail: Optional[str] = None, source: Optional[str] = None,
+                    document_types: Optional[Dict[str, str]] = None) -> int:
     """Stage this bin's outcome locally instead of writing agentic_extraction_status
     directly.
 
@@ -231,13 +232,22 @@ def mark_own_status(guids: List[str], status: str,
     or structured_pending_2, from fetch_bodies_for_guids) - naming it after that
     status, not "drive_files" or any other label, is what keeps this table's
     `source` column legible against pii_extraction_status's own vocabulary.
+
+    `document_types` maps guid -> the category classify_document_type() returned
+    (extraction/core/document_type.py), when it ran at all - only a gate-2
+    (SKIPPED_DOCUMENT_TYPE) rejection has one, so most guids in any group have
+    no entry here and stage a NULL. Unlike `detail`/`source`, this genuinely
+    varies per guid within one shared-outcome group, so it can't be a single
+    value the way those are.
     """
     if not guids:
         return 0
     machine = socket.gethostname()
     trimmed_detail = (detail or None) and detail[:8192]
+    document_types = document_types or {}
     status_staging.stage(
-        (guid, status, trimmed_detail, machine, source) for guid in guids
+        (guid, status, trimmed_detail, machine, source, document_types.get(guid))
+        for guid in guids
     )
     return len(guids)
 
@@ -388,15 +398,19 @@ def _commit_bin(bin_id: int, results: List[dict],
         failed_by_guid = {r["guid"]: r for r in failed}
         for source, guids in _by_source(list(failed_by_guid.keys())).items():
             group = [failed_by_guid[g] for g in guids]
+            # Only a STATUS_REJECTED outcome from gate 2 ever has one (see
+            # PipelineState.document_type's docstring); every other guid in
+            # the group simply has no entry and stages NULL.
+            doc_types = {r["guid"]: r["document_type"] for r in group if r.get("document_type")}
             _mark(
                 f"mark_own_status error_{outcome} (bin {bin_id}, {len(group)} guid(s), source={source})",
-                lambda o=outcome, f=group, g=guids, s=source: mark_own_status(
+                lambda o=outcome, f=group, g=guids, s=source, dt=doc_types: mark_own_status(
                     g, f"error_{o}",
                     # One reason for the group: they share a bin and an outcome, and
                     # per-document detail is what the sheet ledger is for.
                     f"{len(f)} document(s) in bin {bin_id}; first: "
                     f"{f[0].get('detail') or o}",
-                    source=s))
+                    source=s, document_types=dt))
         logger.warning(f"Bin {bin_id}: marked {len(failed)} document(s) as "
                        f"error_{outcome}")
 

@@ -75,7 +75,7 @@ def main() -> int:
         ])
       ),
       to_apply AS (
-        SELECT a.guid, v.mosaic_status, a.gpu_machine
+        SELECT a.guid, v.mosaic_status, a.gpu_machine, a.document_type
         FROM `{ours}` a
         JOIN verdicts v ON v.our_status = a.status
         JOIN `{args.mosaic_table}` m ON m.guid = a.guid
@@ -108,6 +108,7 @@ def main() -> int:
       UPDATE `{args.mosaic_table}` m
       SET status = t.mosaic_status,
           gpu_machine = COALESCE(t.gpu_machine, m.gpu_machine),
+          document_type = COALESCE(t.document_type, m.document_type),
           updated_at = CURRENT_TIMESTAMP()
       FROM (WITH {pending_cte} SELECT * FROM to_apply) t
       WHERE m.guid = t.guid

@@ -318,6 +318,7 @@ def test_run_document_rejects_no_pii_signal_before_any_tool_call():
     assert len(states) == 1
     assert states[0].status == "rejected"
     assert states[0].rejection_code == "NO_PII_SIGNAL"
+    assert states[0].document_type is None, "gate 1 never reaches the classifier at all"
     assert slicer.calls["n"] == 0, "fetch_and_sample must never be called"
 
     print("✓ test_run_document_rejects_no_pii_signal_before_any_tool_call PASSED")
@@ -326,7 +327,8 @@ def test_run_document_rejects_no_pii_signal_before_any_tool_call():
 def test_run_document_rejects_skipped_document_type():
     """A document that clears the PII prefilter but classifies into a
     skip-listed genre is rejected before any Looker call, and the
-    classified type is threaded into the rejection reason."""
+    classified type is threaded into the rejection reason and the
+    structured document_type field."""
     slicer = _fake_sync_tool(LOOK_OK)
 
     async def classify_as_book(client, body_text):
@@ -342,6 +344,7 @@ def test_run_document_rejects_skipped_document_type():
     assert states[0].status == "rejected"
     assert states[0].rejection_code == "SKIPPED_DOCUMENT_TYPE"
     assert "published book or manual" in states[0].rejection_reason
+    assert states[0].document_type == "published book or manual"
     assert slicer.calls["n"] == 0, "fetch_and_sample must never be called"
 
     print("✓ test_run_document_rejects_skipped_document_type PASSED")

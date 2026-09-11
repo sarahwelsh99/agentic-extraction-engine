@@ -314,6 +314,7 @@ def run_pipeline(guid: str, body_text: str = None, load: bool = True) -> dict:
             results["rejected"] = True
             results["rejection_code"] = primary.rejection_code
             results["rejection_reason"] = primary.rejection_reason
+            results["document_type"] = primary.document_type
         else:
             failed = next((s for s in states if s.status == "failed"), states[0])
             logger.warning(

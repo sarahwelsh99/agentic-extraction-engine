@@ -21,8 +21,8 @@ from typing import Iterable, List, Optional, Tuple
 
 DEFAULT_STAGING_DB = "cache/agentic_status_staging.db"
 
-# (guid, status, error_message, gpu_machine, source)
-Verdict = Tuple[str, str, Optional[str], Optional[str], Optional[str]]
+# (guid, status, error_message, gpu_machine, source, document_type)
+Verdict = Tuple[str, str, Optional[str], Optional[str], Optional[str], Optional[str]]
 
 
 def _connect(db_path: str) -> sqlite3.Connection:
@@ -41,6 +41,11 @@ def _connect(db_path: str) -> sqlite3.Connection:
             staged_at DATETIME DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    # Additive migration for a db file created before document_type existed -
+    # SQLite has no "ADD COLUMN IF NOT EXISTS", so check first.
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(staged_verdicts)")}
+    if "document_type" not in existing_cols:
+        conn.execute("ALTER TABLE staged_verdicts ADD COLUMN document_type TEXT")
     conn.commit()
     return conn
 
@@ -55,8 +60,8 @@ def stage(verdicts: Iterable[Verdict], db_path: str = DEFAULT_STAGING_DB) -> Non
     conn = _connect(db_path)
     conn.executemany(
         """INSERT OR REPLACE INTO staged_verdicts
-           (guid, status, error_message, gpu_machine, source, staged_at)
-           VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
+           (guid, status, error_message, gpu_machine, source, document_type, staged_at)
+           VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)""",
         rows,
     )
     conn.commit()
@@ -69,7 +74,7 @@ def drain(db_path: str = DEFAULT_STAGING_DB) -> List[Verdict]:
     """
     conn = _connect(db_path)
     rows = conn.execute(
-        "SELECT guid, status, error_message, gpu_machine, source FROM staged_verdicts"
+        "SELECT guid, status, error_message, gpu_machine, source, document_type FROM staged_verdicts"
     ).fetchall()
     conn.close()
     return rows

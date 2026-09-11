@@ -73,6 +73,15 @@ def main() -> int:
         return 0
 
     client = bigquery.Client(project=config.PROJECT_ID)
+
+    # Additive, so safe to run on every startup - same self-healing pattern
+    # bigquery_service.py's initialize_status_table already uses for source/
+    # gpu_machine on this same table.
+    client.query(f"""
+        ALTER TABLE `{args.agentic_table}`
+        ADD COLUMN IF NOT EXISTS document_type STRING
+    """).result()
+
     job = client.query(
         f"""
         MERGE `{args.agentic_table}` T
@@ -84,12 +93,13 @@ def main() -> int:
             extraction_version = 'agentic-v1',
             gpu_machine = v.gpu_machine,
             source = v.source,
+            document_type = v.document_type,
             extracted_at = CURRENT_TIMESTAMP()
         WHEN NOT MATCHED THEN
             INSERT (guid, status, error_message, extraction_version,
-                    gpu_machine, source, extracted_at)
+                    gpu_machine, source, document_type, extracted_at)
             VALUES (v.guid, v.status, v.error_message, 'agentic-v1',
-                    v.gpu_machine, v.source, CURRENT_TIMESTAMP())
+                    v.gpu_machine, v.source, v.document_type, CURRENT_TIMESTAMP())
         """,
         job_config=bigquery.QueryJobConfig(query_parameters=[
             bigquery.ArrayQueryParameter("verdicts", "RECORD", [
@@ -100,8 +110,9 @@ def main() -> int:
                     bigquery.ScalarQueryParameter("error_message", "STRING", e),
                     bigquery.ScalarQueryParameter("gpu_machine", "STRING", m),
                     bigquery.ScalarQueryParameter("source", "STRING", src),
+                    bigquery.ScalarQueryParameter("document_type", "STRING", dt),
                 )
-                for g, s, e, m, src in verdicts
+                for g, s, e, m, src, dt in verdicts
             ]),
         ]),
     )

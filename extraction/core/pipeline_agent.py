@@ -113,6 +113,13 @@ class PipelineState:
     has_pii: bool = False
     pii_score: int = 0
     pii_signals: str = ""
+    # Set only by gate 2's classify_document_type() call, when it actually
+    # ran and returned a category - None for every other rejection/outcome
+    # (gate 1 never reaches gate 2, and a passing/failed document was never
+    # classified at all). Surfaced up to run_mosaic_structured.py so mosaic's
+    # own document_type column can be populated instead of this value living
+    # only in a free-text rejection_reason string.
+    document_type: Optional[str] = None
 
 
 class PipelineAgent:
@@ -406,6 +413,7 @@ async def run_document(
                 has_pii=prefilter["has_pii"],
                 pii_score=prefilter["pii_score"],
                 pii_signals=prefilter["pii_signals"],
+                document_type=doc_type,
             )
             return [state]
 
