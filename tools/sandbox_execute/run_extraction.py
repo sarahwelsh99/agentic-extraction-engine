@@ -53,6 +53,10 @@ skip_footer_lines = job.get("skip_footer_lines") or 0
 # The generated parser reads its target width from this name rather
 # than embedding it, so one cached parser serves every width.
 field_count = int(job.get("field_count") or len(column_names) or 1)
+# Tokens this document uses to mean "no value" beyond a plain empty string
+# (e.g. "N/A", "-"). The generate_parser_script prompt tells the model this
+# is available as a module-level constant, same as FIELD_COUNT.
+null_values = job.get("null_values") or []
 
 try:
     # Split rows the same way the document was profiled
@@ -109,6 +113,7 @@ try:
         'Dict': Dict,
         'Any': Any,
         'FIELD_COUNT': field_count,
+        'NULL_TOKENS': null_values,
     }
 
     exec(generated_code, namespace)

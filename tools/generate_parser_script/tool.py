@@ -372,6 +372,10 @@ class GenerateParserScriptTool:
         null_values = report.get("null_values") or []
         null_values_line = (
             f"- null tokens (treat as None, same as an empty field): {null_values!r}\n"
+            f"  Available to your code as the module-level constant NULL_TOKENS "
+            f"(a list, provided by the caller before your code runs, same as "
+            f"FIELD_COUNT). USE THE NAME `NULL_TOKENS`; do not write the values "
+            f"in literally.\n"
             if null_values else ""
         )
 

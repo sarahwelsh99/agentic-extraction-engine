@@ -249,6 +249,12 @@ class SandboxExecuteTool:
             # page markers) that are not part of the table. 0 when there is
             # no footer, so a report without one behaves exactly as before.
             "skip_footer_lines": max(0, int(report.get("footer_start_from_bottom") or 0)),
+            # Tokens this document uses to mean "no value" beyond a plain empty
+            # string (e.g. "N/A", "-"). The prompt tells the model NULL_TOKENS is
+            # a module-level constant it can reference, same as FIELD_COUNT, so
+            # the sandbox has to actually provide it or every such reference is
+            # a NameError.
+            "null_values": report.get("null_values") or [],
         })
 
     def _run_extraction(
