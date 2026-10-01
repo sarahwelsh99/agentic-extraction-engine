@@ -14,6 +14,16 @@ GCS_LEDGER_PREFIX = os.getenv("GCS_LEDGER_PREFIX", "extraction-status-ledger")
 GCS_ARTIFACTS_PREFIX = os.getenv("GCS_ARTIFACTS_PREFIX", "extraction-artifacts")
 GCS_INPUT_PREFIX = os.getenv("GCS_INPUT_PREFIX", "extraction-input")
 
+# Backoff between retry attempts on a GCS 429 (object mutation rate limit)
+# while writing Tool 6's Parquet files. A document with hundreds of sheets
+# writes that many files to the same guid= prefix in one burst, which can
+# trip GCS's roughly-1-write/sec-per-object ceiling even though nothing is
+# actually wrong - the 2026-09-26 and 2026-09-28 drain crashes were exactly
+# this (one 882-sheet document, same guid, same bin, twice). The window is
+# short-lived, so a handful of backed-off retries clear it.
+GCS_RETRY_ATTEMPTS = int(os.getenv("GCS_RETRY_ATTEMPTS", "5"))
+GCS_RETRY_BACKOFF_SEC = (2, 5, 10, 20, 30)
+
 # ===== Data Source Configuration =====
 # Query source: glean.drive_files where triage_category = 'INCL_STRUCTURED_RECORD'
 SOURCE_PROJECT = os.getenv("SOURCE_PROJECT", "glean")

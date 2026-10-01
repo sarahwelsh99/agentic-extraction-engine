@@ -9,6 +9,8 @@ and the values written into it, since neither needs a real bucket to test.
 import io
 import json
 import pyarrow.parquet as pq
+from google.api_core import exceptions as gcs_exceptions
+from tools.write_parquet_to_gcs import tool as write_parquet_to_gcs_tool
 from tools.write_parquet_to_gcs.tool import WriteParquetToGcsTool
 
 
@@ -26,17 +28,36 @@ class _StubBlob:
         return self.data
 
 
+class _FlakyBlob(_StubBlob):
+    """Raises GCS's 429 on its first `fail_times` upload attempts, then
+    behaves like a normal blob - simulates the per-object rate limit a
+    document with hundreds of sheets can trip in one write burst."""
+
+    def __init__(self, path, fail_times=0):
+        super().__init__(path)
+        self.fail_times = fail_times
+        self.attempts = 0
+
+    def upload_from_file(self, file_obj, content_type=None):
+        self.attempts += 1
+        if self.attempts <= self.fail_times:
+            raise gcs_exceptions.TooManyRequests(
+                "exceeded the rate limit for object mutation operations")
+        super().upload_from_file(file_obj, content_type=content_type)
+
+
 class _StubBucket:
-    def __init__(self):
+    def __init__(self, blob_factory=_StubBlob):
         self.blobs = {}
+        self._blob_factory = blob_factory
 
     def blob(self, path):
-        return self.blobs.setdefault(path, _StubBlob(path))
+        return self.blobs.setdefault(path, self._blob_factory(path))
 
 
 class _StubClient:
-    def __init__(self):
-        self._bucket = _StubBucket()
+    def __init__(self, blob_factory=_StubBlob):
+        self._bucket = _StubBucket(blob_factory=blob_factory)
 
     def bucket(self, name):
         return self._bucket
@@ -207,6 +228,47 @@ def test_path_is_guid_partitioned_so_reextraction_overwrites():
     print("✓ test_path_is_guid_partitioned_so_reextraction_overwrites PASSED")
 
 
+def test_upload_retries_through_a_gcs_rate_limit_then_succeeds():
+    """A burst of per-sheet writes tripping GCS's 429 (the 2026-09-26/09-28
+    crash: one 882-sheet document, same guid, same bin, twice) should be
+    absorbed by backoff-retry, not surfaced as a failed write."""
+    client = _StubClient(blob_factory=lambda path: _FlakyBlob(path, fail_times=2))
+    sleeps = []
+    real_sleep = write_parquet_to_gcs_tool.time.sleep
+    write_parquet_to_gcs_tool.time.sleep = lambda s: sleeps.append(s)
+    try:
+        r = json.loads(_writer(client)({"guid": "flaky-1", "extracted_rows": ROWS}))
+    finally:
+        write_parquet_to_gcs_tool.time.sleep = real_sleep
+
+    assert r["status"] == "success", r
+    assert r["rows_written"] == 2
+    blob = client._bucket.blobs["test/guid=flaky-1/flaky-1.parquet"]
+    assert blob.attempts == 3, "should fail twice, then succeed on the third attempt"
+    assert len(sleeps) == 2, "should back off before each retry, not before the final success"
+
+    print("✓ test_upload_retries_through_a_gcs_rate_limit_then_succeeds PASSED")
+
+
+def test_upload_gives_up_after_exhausting_retries():
+    """A rate limit that never clears must still surface as a failure -
+    retrying is not a license to hang or silently drop the write."""
+    import extraction.core.config as config
+    client = _StubClient(blob_factory=lambda path: _FlakyBlob(path, fail_times=999))
+    real_sleep = write_parquet_to_gcs_tool.time.sleep
+    write_parquet_to_gcs_tool.time.sleep = lambda s: None
+    try:
+        r = json.loads(_writer(client)({"guid": "flaky-2", "extracted_rows": ROWS}))
+    finally:
+        write_parquet_to_gcs_tool.time.sleep = real_sleep
+
+    assert r["status"] == "error", r
+    blob = client._bucket.blobs["test/guid=flaky-2/flaky-2.parquet"]
+    assert blob.attempts == config.GCS_RETRY_ATTEMPTS
+
+    print("✓ test_upload_gives_up_after_exhausting_retries PASSED")
+
+
 def run_all_tests():
     tests = [
         test_document_gets_its_own_parquet_file_with_typed_bookkeeping,
@@ -216,6 +278,8 @@ def run_all_tests():
         test_many_documents_write_one_file_each,
         test_empty_document_is_skipped_not_failed,
         test_path_is_guid_partitioned_so_reextraction_overwrites,
+        test_upload_retries_through_a_gcs_rate_limit_then_succeeds,
+        test_upload_gives_up_after_exhausting_retries,
     ]
     passed = failed = 0
     for test in tests:
