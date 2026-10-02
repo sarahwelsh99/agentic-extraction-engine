@@ -8,6 +8,12 @@ and the values written into it, since neither needs a real bucket to test.
 
 import io
 import json
+import sqlite3  # noqa: F401 - must load before pyarrow: see tool.py's own
+# sibling, extraction/schema_code_cache.py, which pulls in sqlite3's C
+# extension. Importing pyarrow first in a standalone process can load an
+# incompatible ICU library ahead of it and crash the sqlite3 import; the
+# full pipeline avoids this by sheer import order (tools/__init__.py loads
+# generate_parser_script, and sqlite3 with it, before write_parquet_to_gcs).
 import pyarrow.parquet as pq
 from google.api_core import exceptions as gcs_exceptions
 from tools.write_parquet_to_gcs import tool as write_parquet_to_gcs_tool
