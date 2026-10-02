@@ -43,11 +43,13 @@ import io
 import json
 import logging
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+from google.api_core import exceptions as gcs_exceptions
 from google.cloud import storage
 
 from extraction.core import config
@@ -320,14 +322,37 @@ class WriteParquetToGcsTool:
 
     def _upload(self, guid: str, table: pa.Table, sheet_name: Optional[str] = None) -> int:
         """Write one table to its document's (or sheet's) path, replacing
-        what was there."""
+        what was there.
+
+        Retries on a GCS 429 (object mutation rate limit): a document with
+        hundreds of sheets writes that many files under the same guid=
+        prefix in one burst, which can trip GCS's per-object ceiling even
+        though nothing is actually wrong. The window is short-lived, so a
+        few backed-off retries clear it instead of raising - see
+        config.GCS_RETRY_BACKOFF_SEC's docstring for the incident this
+        covers.
+        """
         buffer = io.BytesIO()
         pq.write_table(table, buffer, compression=self.COMPRESSION)
-        buffer.seek(0)
+        payload = buffer.getvalue()
 
-        blob = self._bucket.blob(self.blob_path(guid, sheet_name))
-        blob.upload_from_file(buffer, content_type="application/octet-stream")
-        return blob.size or buffer.getbuffer().nbytes
+        path = self.blob_path(guid, sheet_name)
+        blob = self._bucket.blob(path)
+        for attempt in range(1, config.GCS_RETRY_ATTEMPTS + 1):
+            try:
+                blob.upload_from_file(io.BytesIO(payload), content_type="application/octet-stream")
+                return blob.size or len(payload)
+            except gcs_exceptions.TooManyRequests as e:
+                if attempt == config.GCS_RETRY_ATTEMPTS:
+                    logger.error(f"{path}: GCS rate limit persisted after "
+                                 f"{attempt} attempt(s), giving up: {e}")
+                    raise
+                delay = config.GCS_RETRY_BACKOFF_SEC[
+                    min(attempt - 1, len(config.GCS_RETRY_BACKOFF_SEC) - 1)]
+                logger.warning(f"{path}: GCS rate limit (attempt "
+                                f"{attempt}/{config.GCS_RETRY_ATTEMPTS}). "
+                                f"Retrying in {delay}s.")
+                time.sleep(delay)
 
     def read_back(self, guid: str, sheet_name: Optional[str] = None) -> pa.Table:
         """Read a document's (or one sheet's) file back. For verification and tests."""

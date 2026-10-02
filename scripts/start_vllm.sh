@@ -1,27 +1,25 @@
 #!/bin/bash
-"""Start vLLM with tensor parallelism across all available GPUs.
-
-This script:
-1. Detects available GPUs
-2. Starts vLLM with tensor parallelism enabled
-3. Verifies all GPUs are active
-4. Logs throughput metrics
-
-Usage:
-    ./start_vllm.sh                    # Auto-detect all GPUs
-    CUDA_VISIBLE_DEVICES=0,1,2,3 ./start_vllm.sh  # Specific GPUs
-"""
+# Start vLLM with tensor parallelism across all available GPUs.
+#
+# This script:
+# 1. Detects available GPUs
+# 2. Starts vLLM with tensor parallelism enabled
+# 3. Verifies all GPUs are active
+# 4. Logs throughput metrics
+#
+# Usage:
+#     ./start_vllm.sh                    # Auto-detect all GPUs
+#     CUDA_VISIBLE_DEVICES=0,1,2,3 ./start_vllm.sh  # Specific GPUs
 
 set -e
 
 # GPU Configuration
 NUM_GPUS=${NUM_GPUS:-$(nvidia-smi --list-gpus | wc -l)}
 MODEL=${MODEL:-"QuantTrio/Qwen3-Coder-30B-A3B-Instruct-GPTQ-Int8"}
-QUANTIZATION=${QUANTIZATION:-"AWQ"}
+QUANTIZATION=${QUANTIZATION:-"gptq_marlin"}
 DTYPE=${DTYPE:-"auto"}
 GPU_MEMORY_UTILIZATION=${GPU_MEMORY_UTILIZATION:-0.9}
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-65536}
-SWAP_SPACE=${SWAP_SPACE:-4}
 ENFORCE_EAGER=${ENFORCE_EAGER:-false}
 SEED=${SEED:-0}
 
@@ -61,13 +59,12 @@ python -m vllm.entrypoints.openai.api_server \
     --pipeline-parallel-size 1 \
     --gpu-memory-utilization "$GPU_MEMORY_UTILIZATION" \
     --max-model-len "$MAX_MODEL_LEN" \
-    --swap-space "$SWAP_SPACE" \
-    --enforce-eager "$ENFORCE_EAGER" \
+    $( [ "$ENFORCE_EAGER" = "true" ] && echo "--enforce-eager" || echo "--no-enforce-eager" ) \
     --seed "$SEED" \
     --host "$API_HOST" \
     --port "$API_PORT" \
-    --disable-log-requests \
-    --log-level INFO \
+    --no-enable-log-requests \
+    --uvicorn-log-level info \
     2>&1 | tee "$LOG_FILE" &
 
 VLLM_PID=$!
@@ -75,17 +72,18 @@ echo "vLLM PID: $VLLM_PID"
 
 # Wait for server to be ready
 echo "Waiting for vLLM server to be ready..."
-for i in {1..60}; do
+READY_TIMEOUT=${READY_TIMEOUT:-600}
+for i in $(seq 1 "$READY_TIMEOUT"); do
     if curl -s "http://localhost:$API_PORT/v1/models" > /dev/null 2>&1; then
         echo "✓ vLLM server is ready"
         break
     fi
-    if [ $i -eq 60 ]; then
-        echo "✗ vLLM server failed to start after 60 seconds"
+    if [ "$i" -eq "$READY_TIMEOUT" ]; then
+        echo "✗ vLLM server failed to start after $READY_TIMEOUT seconds"
         kill $VLLM_PID 2>/dev/null || true
         exit 1
     fi
-    echo "  Waiting... ($i/60)"
+    echo "  Waiting... ($i/$READY_TIMEOUT)"
     sleep 1
 done
 
