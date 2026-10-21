@@ -4,7 +4,9 @@ glean stores spreadsheets in body_text by flattening the workbook, and the
 flattening has to be reversed before anything else makes sense:
 
   * a row ends at a blank line, not at every newline
-  * a row ending in SHEET_MARKER names a worksheet rather than holding data
+  * a row ending in SHEET_MARKER usually names a worksheet - but glean also
+    marks ordinary table rows, so a marked row that looks like one is data
+    (see _looks_like_table_row)
   * CELL_NEWLINE is a line break inside a single cell
   * ZERO_WIDTH characters are invisible litter that str.strip() will not remove
 
@@ -48,6 +50,37 @@ def strip_zero_width(text: str) -> str:
     return (text or "").translate(_ZERO_WIDTH_MAP)
 
 
+# Excel caps a worksheet name at 31 characters, so a longer marked row cannot
+# be an Excel tab name.
+MAX_TAB_NAME_LENGTH = 31
+
+
+def _looks_like_table_row(text: str) -> bool:
+    """Whether a SHEET_MARKER-terminated row is a row of a table rather than a
+    worksheet name.
+
+    glean puts SHEET_MARKER on more than tab names. A Google Sheet's first row
+    often carries it with no tab name before it at all, and an email marks the
+    first row of each table pasted into its body. Treated as a name, that row -
+    usually the table's header - was dropped from the data: 4,370 of a 12,690
+    document sample (34%) lost their header this way, and the column names
+    became the first data record instead (e.g. guid
+    3abecca0-30ec-3fb9-e9f1-16d0759f0bb0, whose real "CMP Case ID, Link to
+    ACC, ..." header became a sheet name).
+
+    Three or more non-empty cells is a table row. Two cells is only a table
+    row past MAX_TAB_NAME_LENGTH, because real tab names do contain a comma
+    ("SumIF, SumIFs&AverageIF", "Alviola,Jess Basil" were both seen in
+    production) and must stay names. The cost of that line is that a short
+    two-column header that is the first, marked row of a document is still
+    read as a name, as before.
+    """
+    non_empty = [c for c in text.split(",") if c.strip()]
+    if len(non_empty) >= 3:
+        return True
+    return len(non_empty) >= 2 and len(text.strip()) > MAX_TAB_NAME_LENGTH
+
+
 def split_records(body_text: str) -> Tuple[List[str], List[str]]:
     """Split flattened workbook text into records and worksheet names.
 
@@ -74,8 +107,13 @@ def split_records(body_text: str) -> Tuple[List[str], List[str]]:
 
     for row in rows:
         if row.endswith(SHEET_MARKER):
-            sheets.append(row[: -len(SHEET_MARKER)])
-            continue
+            row = row[: -len(SHEET_MARKER)]
+            if not _looks_like_table_row(row):
+                sheets.append(row)
+                continue
+            # A marked table row is data. Dropping it here is what left a
+            # document whose rows are nearly all marked with no records at all,
+            # and Tool 2 then failed with "raw_sample is required".
         # Keep the cell intact: a break inside a cell is not a record boundary.
         # Zero-width characters go before the strip, since strip() leaves them.
         row = strip_zero_width(row.replace(CELL_NEWLINE, " ")).strip()
@@ -154,6 +192,17 @@ def split_sheets(body_text: str) -> List[SheetBlock]:
     swallowed the actual header line ("Mentor,Agent,Highlights,...") as
     ordinary content instead.
 
+    A marked row that looks like a table row (_looks_like_table_row) is
+    content wherever it sits, never a name. That covers the layouts where the
+    marker lands on data rather than on a tab name: a Google Sheet whose
+    header is its first, marked row with no name before it, an email whose
+    pasted tables each have a marked first row, and an export that marks
+    every data row. Such a row stays in the block it appears in rather than
+    starting a new one, so the sheet count is the number of real names and
+    no extra unnamed blocks are created: write_parquet_to_gcs names an
+    unnamed block's file <guid>.parquet, so two of them in one document would
+    write to the same path.
+
     A sheet's own last line is genuinely its own tail (not a slice of the
     whole document's end), which matters for the Micro-Slicer's tail window.
 
@@ -198,15 +247,20 @@ def split_sheets(body_text: str) -> List[SheetBlock]:
     for row in rows:
         if row.endswith(SHEET_MARKER):
             text = row[: -len(SHEET_MARKER)]
-            if not in_marker_run or not _looks_like_header_row(text):
+            # A marker row immediately following another one, that itself
+            # looks like a real header (>= 2 non-empty cells), is this sheet's
+            # content - not a third+ sheet name. So is any marked row that
+            # looks like a row of a table, wherever it sits.
+            is_content = (
+                (in_marker_run and _looks_like_header_row(text))
+                or _looks_like_table_row(text)
+            )
+            if not is_content:
                 flush()
                 current_name = text
                 current_lines = []
                 in_marker_run = True
             else:
-                # A marker row immediately following another one, that
-                # itself looks like a real header (>= 2 non-empty cells),
-                # is this sheet's content - not a third+ sheet name.
                 cleaned = strip_zero_width(text.replace(CELL_NEWLINE, " ")).strip()
                 if cleaned:
                     current_lines.append(cleaned)
