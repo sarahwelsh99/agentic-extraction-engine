@@ -182,6 +182,82 @@ def test_sheet_name_is_slugified_for_a_safe_filename():
     print("✓ test_sheet_name_is_slugified_for_a_safe_filename PASSED")
 
 
+def _rows_for(sheet_name, n, key="v"):
+    return [{key: str(i), "_valid": True, "_row_number": i, "_sheet_name": sheet_name}
+            for i in range(n)]
+
+
+def test_repeats_of_a_long_sheet_name_each_get_their_own_file():
+    """Real bug found on guid b9ba208b (an email thread, 2026-10-21): a report
+    title past the 80-character filename limit repeated through the thread.
+    The " (2)" that tells repeats apart was cut off with the rest of the name,
+    so every repeat wrote to the same path and only the last survived - 65
+    rows extracted, 14 in GCS."""
+    client = _StubClient()
+    long_name = "Customer Experience - VOC Platinum Platinum Aug Sep Oct " + "x" * 60
+    rows = (_rows_for(long_name, 3) + _rows_for("Other", 1)
+            + _rows_for(long_name, 5) + _rows_for("Other 2", 1) + _rows_for(long_name, 2))
+    r = json.loads(_writer(client)({"guid": "long-1", "extracted_rows": rows}))
+
+    assert r["status"] == "success", r
+    assert r["files_written"] == 5
+    assert len(client._bucket.blobs) == 5, "every run has its own path"
+    written = {f["uri"]: f["rows"] for f in r["files"]}
+    assert len(written) == 5
+    assert sum(pq.read_table(io.BytesIO(b.data)).num_rows for b in client._bucket.blobs.values()) == 12
+    assert all(len(p.split("/")[-1]) <= 80 + len(".parquet") for p in client._bucket.blobs)
+
+    print("✓ test_repeats_of_a_long_sheet_name_each_get_their_own_file PASSED")
+
+
+def test_two_long_names_that_only_differ_past_the_limit_do_not_collide():
+    """Different names that share their first 80 slug characters cut to the
+    same filename; the second gets a suffix instead of overwriting the first."""
+    client = _StubClient()
+    prefix = "MAXWELL AV MAXWELL AV MAXWELL AV MACFARLANE AV MCCUNE AV MCMILLAN AV MULDREW CR "
+    rows = _rows_for(prefix + "ROZIER", 2) + _rows_for(prefix + "REYNOLDS", 3)
+    r = json.loads(_writer(client)({"guid": "long-2", "extracted_rows": rows}))
+
+    assert r["files_written"] == 2
+    assert len(client._bucket.blobs) == 2
+    assert sorted(pq.read_table(io.BytesIO(b.data)).num_rows for b in client._bucket.blobs.values()) == [2, 3]
+
+    print("✓ test_two_long_names_that_only_differ_past_the_limit_do_not_collide PASSED")
+
+
+def test_two_unnamed_sheets_in_one_document_do_not_collide():
+    """Every unnamed sheet maps to <guid>.parquet. The first keeps that path,
+    so a document's ordinary file name is unchanged; a later one gets its own."""
+    client = _StubClient()
+    rows = _rows_for(None, 2) + _rows_for("Tab", 1) + _rows_for(None, 4)
+    r = json.loads(_writer(client)({"guid": "unnamed-1", "extracted_rows": rows}))
+
+    assert r["files_written"] == 3
+    assert set(client._bucket.blobs) == {
+        "test/guid=unnamed-1/unnamed-1.parquet",
+        "test/guid=unnamed-1/Tab.parquet",
+        "test/guid=unnamed-1/unnamed_2.parquet",
+    }
+    assert pq.read_table(io.BytesIO(client._bucket.blobs["test/guid=unnamed-1/unnamed_2.parquet"].data)).num_rows == 4
+
+    print("✓ test_two_unnamed_sheets_in_one_document_do_not_collide PASSED")
+
+
+def test_short_sheet_names_keep_the_filenames_they_had():
+    """The suffix handling must not rename existing outputs: a re-extraction
+    overwrites in place only if a name slugs exactly as it did before."""
+    def old_slug(name):
+        import re
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name or "").strip("_")
+        return safe[:80] or "unnamed"
+
+    for name in ["WEEK 1 PGU,", "WEEK 1 PGU, (2)", "Andreea Dobrica", "Week 1,,,,Week 2,,",
+                 "Copy of Sheet (3)", "Clasificación por Edad", "Team AHT", "x" * 80, "", ","]:
+        assert WriteParquetToGcsTool._slug(name) == old_slug(name), name
+
+    print("✓ test_short_sheet_names_keep_the_filenames_they_had PASSED")
+
+
 def test_many_documents_write_one_file_each():
     """Unlike the BigQuery table this replaced, there is no shared schema:
     each document's file holds only that document's own columns."""
@@ -281,6 +357,10 @@ def run_all_tests():
         test_sheets_get_their_own_file_not_one_wide_unioned_table,
         test_two_sheets_sharing_a_name_do_not_collapse_into_one_file,
         test_sheet_name_is_slugified_for_a_safe_filename,
+        test_repeats_of_a_long_sheet_name_each_get_their_own_file,
+        test_two_long_names_that_only_differ_past_the_limit_do_not_collide,
+        test_two_unnamed_sheets_in_one_document_do_not_collide,
+        test_short_sheet_names_keep_the_filenames_they_had,
         test_many_documents_write_one_file_each,
         test_empty_document_is_skipped_not_failed,
         test_path_is_guid_partitioned_so_reextraction_overwrites,
