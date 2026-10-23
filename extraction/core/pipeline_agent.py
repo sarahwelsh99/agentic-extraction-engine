@@ -346,6 +346,7 @@ async def run_document(
     tools: Optional[Dict[str, Any]] = None,
     llm_session_factory: Optional[Any] = None,
     document_type_classifier: Optional[Any] = None,
+    max_sheets_in_flight: Optional[int] = None,
 ) -> List[PipelineState]:
     """Detect worksheets and run each one through the agent loop concurrently.
 
@@ -360,7 +361,9 @@ async def run_document(
     sharing one across concurrent sheets would interleave unrelated turns).
     They run genuinely concurrently via asyncio.gather - the I/O each one
     does (structural_inspector/generate_parser_script's LLM calls,
-    sandbox_execute's Docker container) is all async under the hood.
+    sandbox_execute's Docker container) is all async under the hood - but at
+    most config.MAX_SHEETS_IN_FLIGHT at a time, so one workbook with hundreds
+    of tabs cannot flood the vLLM server every other worker shares.
 
     Args:
         tools: passed through to every sheet's PipelineAgent - see its own
@@ -375,6 +378,7 @@ async def run_document(
             pre-Looker gate below doesn't need a real vLLM singleton - unlike
             the regex prefilter (pure, no I/O, always run for real), this one
             makes an LLM call.
+        max_sheets_in_flight: overrides config.MAX_SHEETS_IN_FLIGHT.
 
     Returns:
         One PipelineState per sheet, in document order.
@@ -438,4 +442,12 @@ async def run_document(
         agent.state.pii_signals = pii["pii_signals"]
         agents.append(agent)
 
-    return list(await asyncio.gather(*(agent.run() for agent in agents)))
+    # Bounded, not one task per sheet all at once - see
+    # config.MAX_SHEETS_IN_FLIGHT for the timeout storm that caused.
+    limit = asyncio.Semaphore(max_sheets_in_flight or config.MAX_SHEETS_IN_FLIGHT)
+
+    async def run_bounded(agent: PipelineAgent) -> PipelineState:
+        async with limit:
+            return await agent.run()
+
+    return list(await asyncio.gather(*(run_bounded(agent) for agent in agents)))
