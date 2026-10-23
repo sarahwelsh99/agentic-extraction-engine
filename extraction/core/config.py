@@ -94,8 +94,8 @@ MAX_WORKERS = int(os.getenv("MAX_WORKERS", "32"))
 # with hundreds of tabs used to start every tab's LLM calls together: in the
 # 2026-10-21 structured_pending drain, bins holding 545- and 453-tab workbooks
 # left vLLM with ~170 requests running and ~200 queued, so every other
-# document's calls sat past the 300s timeout and retried - 2,105 sheets across
-# 81 documents never got an answer, and those bins took twice as long. With
+# document's calls sat past the 300s timeout and retried - 2,307 sheets across
+# 161 documents never got an answer, and those bins took twice as long. With
 # the cap, a big workbook waits its own turn instead of starving the other
 # workers; a document with fewer sheets than this is unaffected.
 MAX_SHEETS_IN_FLIGHT = int(os.getenv("MAX_SHEETS_IN_FLIGHT", "8"))
