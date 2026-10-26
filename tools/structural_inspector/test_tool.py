@@ -86,12 +86,82 @@ def test_missing_sample_is_an_error():
     print("✓ test_missing_sample_is_an_error PASSED")
 
 
+def test_a_miscounted_header_index_is_corrected_in_the_report():
+    """A model reply one line too low still yields the real header, and the
+    first data row stays out of the column names. Built from a spec rather
+    than a live call: the miscount depends on real document content and no
+    short synthetic sample reproduces it reliably."""
+    spec = {
+        "head_bounds": {
+            "has_header": True, "header_line_index": 2,
+            "data_start_line_index": 3,
+            "inferred_columns": ["POC Name", "Acct #", "Company Name", "Call Count"],
+        },
+        "tail_bounds": {"footer_start_from_bottom": 0},
+        "format_spec": {"delimiter_type": "comma", "quote_char": '"'},
+    }
+    lines = [
+        "Subject: *** FOR CALLBACK *** January 13, 2024",
+        "POC Name ,Acct # ,Company Name ,Call Count",
+        "Rivera, Ana ,16390 ,Northwind Traders ,1",
+        ",18257 ,Contoso Health Advisors ,1",
+    ]
+    report = StructuralInspectorTool()._to_metadata_report(spec, lines, {})
+
+    assert report["header_row_index"] == 1, report
+    assert report["header_names"][:2] == ["POC Name", "Acct #"], report
+
+    print("✓ test_a_miscounted_header_index_is_corrected_in_the_report PASSED")
+
+
+_LINES = [
+    "Subject: weekly report",
+    "Name,Employee ID,Site,Calls",
+    "Ana Rivera,10323931,Manila,46",
+    "Ben Okafor,10299152,Manila,8",
+]
+
+
+def test_realign_moves_a_miscounted_header_up_to_the_real_one():
+    inferred = ["Name", "Employee ID", "Site", "Calls"]
+    assert StructuralInspectorTool._realign_header(_LINES, 2, inferred, ",", '"') == 1
+    print("✓ test_realign_moves_a_miscounted_header_up_to_the_real_one PASSED")
+
+
+def test_realign_keeps_a_header_the_model_counted_right():
+    inferred = ["Name", "Employee ID", "Site", "Calls"]
+    assert StructuralInspectorTool._realign_header(_LINES, 1, inferred, ",", '"') == 1
+    print("✓ test_realign_keeps_a_header_the_model_counted_right PASSED")
+
+
+def test_realign_needs_a_clear_margin_to_move():
+    """One more shared name is not enough: a header and a title line can
+    share a word, and moving on a near-tie would trade one wrong line for
+    another."""
+    lines = ["Calls by Site", "Site,Calls,Week", "Manila,46,1"]
+    assert StructuralInspectorTool._realign_header(lines, 2, ["Site", "Calls"], ",", '"') == 1
+    assert StructuralInspectorTool._realign_header(lines, 1, ["Site"], ",", '"') == 1
+    # line 1 shares two names, line 2 shares one: a margin of one, so no move
+    assert StructuralInspectorTool._realign_header(lines, 2, ["Site", "Calls", "Manila"], ",", '"') == 2
+    print("✓ test_realign_needs_a_clear_margin_to_move PASSED")
+
+
+def test_realign_without_inferred_columns_leaves_the_index_alone():
+    assert StructuralInspectorTool._realign_header(_LINES, 2, [], ",", '"') == 2
+    print("✓ test_realign_without_inferred_columns_leaves_the_index_alone PASSED")
+
+
 def run_all_tests():
     tests = [
         test_simple_csv_is_read_and_adapted_for_tool3_and_tool4,
         test_footer_and_null_tokens_are_reported,
         test_prose_report_is_rejected_as_not_tabular,
         test_missing_sample_is_an_error,
+        test_a_miscounted_header_index_is_corrected_in_the_report,
+        test_realign_moves_a_miscounted_header_up_to_the_real_one,
+        test_realign_keeps_a_header_the_model_counted_right,
+        test_realign_needs_a_clear_margin_to_move,
+        test_realign_without_inferred_columns_leaves_the_index_alone,
     ]
     passed = failed = 0
     for test in tests:
