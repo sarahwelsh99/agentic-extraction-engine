@@ -146,6 +146,33 @@ def test_realign_needs_a_clear_margin_to_move():
     print("✓ test_realign_needs_a_clear_margin_to_move PASSED")
 
 
+def test_realign_reaches_a_header_several_lines_away():
+    """From the 2026-10-21 drain: a vehicle alert where the model named the
+    HostName line, two above the real header."""
+    lines = [
+        "Subject: CURRENT DISCONNECTED VEHICLE Alert Report",
+        "Dear Sir / Madam ,",
+        "Account : TELUS",
+        "HostName : http://aot16.fleetvigil.net/",
+        "Please find below the details for your reference.",
+        "Sr.No ,Vehicle Alias ,Vehicle RTO No ,Vendor Name",
+        "1 ,5754120512821 ,HR55AM8858TRX ,-",
+    ]
+    inferred = ["Sr.No", "Vehicle Alias", "Vehicle RTO No", "Vendor Name"]
+    assert StructuralInspectorTool._realign_header(lines, 3, inferred, ",", '"') == 5
+    # beyond REALIGN_REACH the model's index stands
+    assert StructuralInspectorTool._realign_header(lines, 1, inferred, ",", '"') == 1
+    print("✓ test_realign_reaches_a_header_several_lines_away PASSED")
+
+
+def test_realign_prefers_the_nearer_of_two_equal_matches():
+    """Two tables with the same header: the one nearer the model's pick wins."""
+    lines = ["Site,Calls", "Manila,46", "Note", "Site,Calls", "Cebu,8"]
+    assert StructuralInspectorTool._realign_header(lines, 1, ["Site", "Calls"], ",", '"') == 0
+    assert StructuralInspectorTool._realign_header(lines, 2, ["Site", "Calls"], ",", '"') == 3
+    print("✓ test_realign_prefers_the_nearer_of_two_equal_matches PASSED")
+
+
 def test_realign_without_inferred_columns_leaves_the_index_alone():
     assert StructuralInspectorTool._realign_header(_LINES, 2, [], ",", '"') == 2
     print("✓ test_realign_without_inferred_columns_leaves_the_index_alone PASSED")
@@ -161,6 +188,8 @@ def run_all_tests():
         test_realign_moves_a_miscounted_header_up_to_the_real_one,
         test_realign_keeps_a_header_the_model_counted_right,
         test_realign_needs_a_clear_margin_to_move,
+        test_realign_reaches_a_header_several_lines_away,
+        test_realign_prefers_the_nearer_of_two_equal_matches,
         test_realign_without_inferred_columns_leaves_the_index_alone,
     ]
     passed = failed = 0
