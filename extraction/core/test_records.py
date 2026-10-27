@@ -8,7 +8,7 @@ with its own header, e.g. guid 3d4e39dc-9d38-249d-9ab5-0deff55e817a).
 """
 
 from extraction.core.records import (
-    ROW_SEPARATOR, SHEET_MARKER, has_multiple_sheets, split_sheets,
+    ROW_SEPARATOR, SHEET_MARKER, has_multiple_sheets, split_records, split_sheets,
 )
 
 
@@ -147,6 +147,109 @@ def test_empty_document_is_a_single_empty_sheet():
     print("✓ test_empty_document_is_a_single_empty_sheet PASSED")
 
 
+def test_a_marked_header_with_no_name_before_it_stays_the_header():
+    """Real bug found on guid 3abecca0-30ec-3fb9-e9f1-16d0759f0bb0, a Google
+    Sheet: glean marked its header row and put no tab name before it. Read as
+    a sheet name, the header was dropped and the first data record became the
+    file's column names. It is the sheet's first line instead."""
+    header = "CMP Case ID,Link to ACC,Case Created Date,Case Status,Account"
+    body = ROW_SEPARATOR.join([
+        f"{header}{SHEET_MARKER}",
+        "3f846edd,https://acc/1,2024-01-02,RESOLVED,Telus",
+        "9a1c22b0,https://acc/2,2024-01-03,OPEN,Telus",
+    ])
+
+    blocks = split_sheets(body)
+
+    assert len(blocks) == 1
+    assert blocks[0].name is None
+    assert blocks[0].body_text.split(ROW_SEPARATOR) == [
+        header,
+        "3f846edd,https://acc/1,2024-01-02,RESOLVED,Telus",
+        "9a1c22b0,https://acc/2,2024-01-03,OPEN,Telus",
+    ]
+
+    print("✓ test_a_marked_header_with_no_name_before_it_stays_the_header PASSED")
+
+
+def test_an_emails_marked_table_header_stays_in_the_body():
+    """The shape structured_pending emails have: prose, then a pasted table
+    whose first row carries SHEET_MARKER. That row is the table's header and
+    must stay in the same block as the rows under it, not become a sheet name
+    that splits the email in two."""
+    header = "Endorsement Date ,WD ID ,First Name ,Last Name ,Hire Date"
+    body = ROW_SEPARATOR.join([
+        "Subject: NH PACKET ENDORSEMENT",
+        "Hi Team,",
+        f"{header}{SHEET_MARKER}",
+        "1202025 ,10333914 ,Tim ,Fuhwi ,12/16/2024",
+        "1202025 ,10333915 ,Ana ,Reyes ,12/16/2024",
+    ])
+
+    blocks = split_sheets(body)
+
+    assert len(blocks) == 1
+    lines = blocks[0].body_text.split(ROW_SEPARATOR)
+    assert lines[2] == header.strip()
+    assert lines[3:] == ["1202025 ,10333914 ,Tim ,Fuhwi ,12/16/2024",
+                         "1202025 ,10333915 ,Ana ,Reyes ,12/16/2024"]
+
+    print("✓ test_an_emails_marked_table_header_stays_in_the_body PASSED")
+
+
+def test_a_tab_name_containing_a_comma_is_still_a_name():
+    """Real tab names contain commas ("SumIF, SumIFs&AverageIF" and
+    "Alviola,Jess Basil" were both seen in production). Two short cells stay a
+    name, so these workbooks still split into their own tabs."""
+    body = ROW_SEPARATOR.join([
+        _sheet_rows("SumIF, SumIFs&AverageIF", "Item,Qty,Price", "a,1,2"),
+        _sheet_rows("Alviola,Jess Basil", "Week,TL,Agent", "51,x,y"),
+    ])
+
+    blocks = split_sheets(body)
+
+    assert [b.name for b in blocks] == ["SumIF, SumIFs&AverageIF", "Alviola,Jess Basil"]
+    assert blocks[0].body_text.split(ROW_SEPARATOR)[0] == "Item,Qty,Price"
+    assert blocks[1].body_text.split(ROW_SEPARATOR)[0] == "Week,TL,Agent"
+
+    print("✓ test_a_tab_name_containing_a_comma_is_still_a_name PASSED")
+
+
+def test_a_long_two_cell_marked_row_is_a_table_row():
+    """Past Excel's 31-character tab-name limit, even two cells cannot be a tab
+    name, so the row is data."""
+    header = "Candidate Full Legal Name,Date Of Interview Scheduled"
+    assert len(header) > 31
+    body = ROW_SEPARATOR.join([f"{header}{SHEET_MARKER}", "Ana Reyes,2025-03-29"])
+
+    blocks = split_sheets(body)
+
+    assert len(blocks) == 1
+    assert blocks[0].body_text.split(ROW_SEPARATOR) == [header, "Ana Reyes,2025-03-29"]
+
+    print("✓ test_a_long_two_cell_marked_row_is_a_table_row PASSED")
+
+
+def test_split_records_keeps_marked_table_rows():
+    """An export that marks every data row (seen on chart.xls-style call
+    volume exports) is dense enough that split_sheets() falls back to the
+    whole text, which then goes through split_records(). Dropping marked rows
+    there left no records at all, and Tool 2 failed with "raw_sample is
+    required" - 475 documents in one bin on 2026-10-20. The table rows are
+    kept; a real name is still reported as a name."""
+    rows = [f"2025-09-10 00:{m:02d}:00, {m}, 0, 0, 5{SHEET_MARKER}" for m in range(0, 60, 15)]
+    body = ROW_SEPARATOR.join(["DateTime,Arrived,Abandoned,Short,Answered",
+                               f"Chart{SHEET_MARKER}", *rows])
+
+    records, sheets = split_records(body)
+
+    assert sheets == ["Chart"]
+    assert records[0] == "DateTime,Arrived,Abandoned,Short,Answered"
+    assert records[1:] == [r[: -len(SHEET_MARKER)] for r in rows]
+
+    print("✓ test_split_records_keeps_marked_table_rows PASSED")
+
+
 def run_all_tests():
     tests = [
         test_ordinary_document_is_a_single_unnamed_sheet,
@@ -157,6 +260,11 @@ def run_all_tests():
         test_a_marker_dense_document_is_not_a_real_workbook,
         test_marker_density_at_the_threshold_still_splits,
         test_empty_document_is_a_single_empty_sheet,
+        test_a_marked_header_with_no_name_before_it_stays_the_header,
+        test_an_emails_marked_table_header_stays_in_the_body,
+        test_a_tab_name_containing_a_comma_is_still_a_name,
+        test_a_long_two_cell_marked_row_is_a_table_row,
+        test_split_records_keeps_marked_table_rows,
     ]
     passed = failed = 0
     for test in tests:

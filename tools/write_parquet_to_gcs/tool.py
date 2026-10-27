@@ -56,6 +56,11 @@ from extraction.core import config
 
 logger = logging.getLogger(__name__)
 
+# Longest filename (before .parquet) a sheet name is cut to.
+SLUG_MAX_LENGTH = 80
+# The " (N)" __call__ appends to a repeated sheet name.
+_DUPLICATE_SUFFIX = re.compile(r" \((\d+)\)$")
+
 
 class WriteParquetToGcsTool:
     """Write extracted rows to GCS, one Parquet file per document."""
@@ -110,8 +115,10 @@ class WriteParquetToGcsTool:
         """The file is named for the sheet when there is one, and for the
         guid itself when there isn't (an ordinary single-table document, no
         sheet to name it after)."""
-        filename = self._slug(sheet_name) if sheet_name is not None else guid
-        return f"{self.prefix}/guid={guid}/{filename}.parquet"
+        return f"{self.prefix}/guid={guid}/{self._filename(guid, sheet_name)}.parquet"
+
+    def _filename(self, guid: str, sheet_name: Optional[str]) -> str:
+        return self._slug(sheet_name) if sheet_name is not None else guid
 
     def uri(self, guid: str, sheet_name: Optional[str] = None) -> str:
         return f"gs://{self.bucket_name}/{self.blob_path(guid, sheet_name)}"
@@ -123,9 +130,21 @@ class WriteParquetToGcsTool:
         Sheet names are the source workbook's own tab names verbatim, so they
         can carry commas, slashes, spaces or nothing usable at all - none of
         which belong in a GCS object path.
+
+        A " (N)" suffix, which __call__ adds to tell repeated names apart, is
+        kept whole when the name is cut to SLUG_MAX_LENGTH: the name is
+        shortened before it, not the suffix. Cutting after it dropped the
+        suffix from any name past the limit, so every repeat of a long name
+        got the same path and overwrote the one before - 418 rows lost from 4
+        of 155 documents in one bin on 2026-10-21, mostly emails whose long
+        report titles repeat through a thread.
         """
-        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name or "").strip("_")
-        return safe[:80] or "unnamed"
+        name = name or ""
+        match = _DUPLICATE_SUFFIX.search(name)
+        suffix = f"_{match.group(1)}" if match else ""
+        base = name[:match.start()] if match else name
+        safe = re.sub(r"[^A-Za-z0-9._-]+", "_", base).strip("_")
+        return (safe[:SLUG_MAX_LENGTH - len(suffix)] or "unnamed") + suffix
 
     def __call__(self, inputs: Dict[str, Any]) -> str:
         """Write one document, or a batch of them - one file per sheet.
@@ -167,17 +186,20 @@ class WriteParquetToGcsTool:
 
                 # Two genuinely different sheets can share an identical raw
                 # tab name (seen in production); every file for this guid
-                # still needs its own path, so a repeated slug earns a
+                # still needs its own path, so a repeated filename earns a
                 # disambiguating suffix rather than silently overwriting the
-                # first sheet's file with the second's.
-                used_slugs: Dict[str, int] = {}
+                # first sheet's file with the second's. Checked against the
+                # final filename, not the raw name: two different names can
+                # slug to the same path once cut to SLUG_MAX_LENGTH, and every
+                # unnamed sheet maps to <guid>.parquet.
+                used_files: set = set()
                 for sheet_name, sheet_rows in self._group_by_sheet(rows):
                     display_name = sheet_name
-                    if sheet_name is not None:
-                        slug = self._slug(sheet_name)
-                        used_slugs[slug] = used_slugs.get(slug, 0) + 1
-                        if used_slugs[slug] > 1:
-                            display_name = f"{sheet_name} ({used_slugs[slug]})"
+                    n = 1
+                    while self._filename(guid, display_name) in used_files:
+                        n += 1
+                        display_name = f"{sheet_name or ''} ({n})"
+                    used_files.add(self._filename(guid, display_name))
 
                     table = self._build_table(guid, sheet_rows, extracted_at, display_name)
                     size = self._upload(guid, table, display_name)

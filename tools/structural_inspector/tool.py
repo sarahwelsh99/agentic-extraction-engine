@@ -414,6 +414,10 @@ DOCUMENT:
         # split here mechanically - complete and verbatim - rather than
         # trusting the model's summary of it.
         if has_header and 0 <= header_row_index < len(lines):
+            header_row_index = self._realign_header(
+                lines, header_row_index, head.get("inferred_columns") or [],
+                delimiter, quote_char,
+            )
             header_names = self._unique_names(
                 self._split(lines[header_row_index], delimiter, quote_char)
             )
@@ -454,6 +458,55 @@ DOCUMENT:
             return next(csv.reader([line], delimiter=delimiter, quotechar=quote_char or '"'))
         except (csv.Error, StopIteration):
             return line.split(delimiter)
+
+    # How many lines either side of the model's header index to search.
+    REALIGN_REACH = 3
+
+    @classmethod
+    def _realign_header(
+        cls, lines: List[str], index: int, inferred: List[str],
+        delimiter: str, quote_char: Optional[str],
+    ) -> int:
+        """The neighbouring line the model's own column names actually match.
+
+        The model recognises the header reliably but miscounts its line
+        number, typically one too high when a subject or title line sits above
+        the header, so the first data row became the column names and dropped
+        out of the data. Of 202 such sheets replayed from the 2026-10-21 drain,
+        174 came back that way. The names it reads into inferred_columns are
+        imperfect (see _to_metadata_report) but still match the real header
+        far better than a data row, so the line is taken from whichever line
+        within REALIGN_REACH of the model's shares the most of them - and left
+        alone unless another line shares at least two more. On the same 202
+        this left 6-7 off by one. The reach is 3 rather than 1 because the
+        miss is sometimes two or three lines, in an email preamble whose
+        lines share none of the column names (a fleet alert template that is
+        about half of the affected documents misses by two on some runs).
+
+        Two prompt-side fixes were measured on the same sheets and rejected.
+        Numbering every line fixed the miscount but made the model call ~2.5%
+        more small, real tables a report. Dropping the "--- HEAD ---" banner
+        above the first line (the model sometimes counts it as line 0) fixed
+        only about a third of them and raised rejections.
+        """
+        wanted = {c.strip().lower() for c in inferred if c and c.strip()}
+        if not wanted:
+            return index
+
+        def overlap(i: int) -> int:
+            cells = {c.strip().lower() for c in cls._split(lines[i], delimiter, quote_char)}
+            return len(wanted & cells)
+
+        # Nearest lines first, so a farther line has to beat a nearer match
+        # by the same margin rather than winning a tie.
+        best, best_score = index, overlap(index)
+        for distance in range(1, cls.REALIGN_REACH + 1):
+            for i in (index - distance, index + distance):
+                if 0 <= i < len(lines):
+                    score = overlap(i)
+                    if score >= best_score + 2:
+                        best, best_score = i, score
+        return best
 
     @staticmethod
     def _unique_names(cells: List[str]) -> List[str]:

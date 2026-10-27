@@ -304,6 +304,33 @@ def test_run_document_sheets_run_concurrently():
     print(f"✓ test_run_document_sheets_run_concurrently PASSED ({elapsed:.2f}s for {n} sheets)")
 
 
+def test_run_document_caps_sheets_in_flight():
+    """A workbook with many tabs runs at most max_sheets_in_flight of them at
+    once, and still returns every sheet's state in document order."""
+    in_flight = {"now": 0, "peak": 0}
+
+    async def counting_inspector(inputs):
+        in_flight["now"] += 1
+        in_flight["peak"] = max(in_flight["peak"], in_flight["now"])
+        await asyncio.sleep(0.05)
+        in_flight["now"] -= 1
+        return json.dumps(LOOK_OK)
+
+    states = asyncio.run(run_document(
+        "g", _sheets_body(6),
+        tools=_default_tools(structural_inspector=counting_inspector),
+        llm_session_factory=FakeSession,
+        document_type_classifier=_no_skip_classifier,
+        max_sheets_in_flight=2,
+    ))
+
+    assert in_flight["peak"] == 2
+    assert [s.sheet_name for s in states] == [f"Sheet{i}" for i in range(6)]
+    assert all(s.status == "success" for s in states)
+
+    print("✓ test_run_document_caps_sheets_in_flight PASSED")
+
+
 def test_run_document_rejects_no_pii_signal_before_any_tool_call():
     """A document with no notifiable-PII signal anywhere is rejected at the
     whole-document prefilter gate, before split_sheets() or any tool call -
@@ -380,6 +407,7 @@ def run_all_tests():
         test_run_document_fans_out_one_agent_per_sheet,
         test_run_document_scores_pii_per_sheet_independently,
         test_run_document_sheets_run_concurrently,
+        test_run_document_caps_sheets_in_flight,
         test_run_document_rejects_no_pii_signal_before_any_tool_call,
         test_run_document_rejects_skipped_document_type,
         test_run_document_never_skips_the_other_catchall,
